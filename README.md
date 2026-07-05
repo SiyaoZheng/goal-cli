@@ -176,7 +176,7 @@ Sources: [Addy Osmani](https://addyosmani.com/blog/loop-engineering/),
 
 ### How It Works
 
-The setup file is `goal.toml`. It answers four plain questions:
+The setup file is `goal.toml`. It answers a few plain questions:
 
 | Question | In `goal.toml` |
 | --- | --- |
@@ -184,6 +184,7 @@ The setup file is `goal.toml`. It answers four plain questions:
 | How do I rebuild it? | `[producer].command` |
 | How should it be checked? | `[tik]` |
 | Where may the coding agent edit source files? | `[tok].write_dirs` |
+| Where may runtime commands produce side effects? | `[tok].runtime_write_dirs` |
 
 You may see these short names in the config and deeper docs:
 
@@ -217,12 +218,14 @@ max_output_tokens = 4096
 
 [tok]
 provider = "codex_goal"
-write_dirs = ["writing", "src"]
+write_dirs = ["src", "data"]
+run_cwd = "."
+runtime_write_dirs = ["outputs", "build", "logs"]
 sandbox = "workspace-write"
 codex_features = ["goals"]
 
 [safety]
-generated_dirs = ["outputs", "build", ".goal"]
+generated_dirs = ["outputs", "build", "logs"]
 max_blocker_repeats = 3
 ```
 

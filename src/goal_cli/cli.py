@@ -46,6 +46,10 @@ Write the critique plainly, then include a JSON object with this shape:
 [tok]
 provider = "codex_goal"
 write_dirs = ["src"]
+# Optional: set run_cwd and runtime_write_dirs when the producer must run from
+# the project root and refresh generated artifacts outside write_dirs.
+# run_cwd = "."
+# runtime_write_dirs = ["output", "build", "logs"]
 sandbox = "workspace-write"
 codex_features = ["goals"]
 

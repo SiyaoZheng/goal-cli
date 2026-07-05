@@ -657,12 +657,15 @@ class GoalRuntimeTests(unittest.TestCase):
         self.assertEqual(config.tik.provider, "codex_file")
         self.assertEqual(config.tok.provider, "codex_goal")
         prompt_text = config.tik.prompt + "\n" + config.tok.prompt_template
-        banned = ["Adrian", "user", "human", "approval", "decision_required", "ask", "bounded", "Writable scopes", "{writable_scopes}", "{tik_ledger}"]
+        banned = ["Adrian", "user", "human", "approval", "decision_required", "ask", "bounded", "Writable scopes", "{tik_ledger}"]
         for term in banned:
             self.assertNotIn(term, prompt_text)
         self.assertIn("publication\nstandard of APSR", prompt_text)
         self.assertIn("produced by `{producer_command}`", prompt_text)
         self.assertIn("{tik_review_path}", prompt_text)
+        self.assertIn("{writable_scopes}", prompt_text)
+        self.assertIn("{runtime_writable_scopes}", prompt_text)
+        self.assertIn("{tok_run_cwd}", prompt_text)
 
     def test_scientificity_example_validates_after_copy_to_project_root(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]

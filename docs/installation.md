@@ -175,6 +175,9 @@ Then edit `goal.toml` so:
 - `[tik]` either runs a deterministic oracle command, an OpenAI file-upload
   agent review, or a Codex local-file review.
 - `[tok].write_dirs` contains only source directories the tok may edit.
+- `[tok].run_cwd`, when set, is where the tok process starts commands.
+- `[tok].runtime_write_dirs` contains generated directories that commands may
+  refresh without making them source-edit scopes.
 - `[no_mistakes].intent`, when set, describes the non-interactive gate intent.
 - `[safety].generated_dirs` lists generated outputs the tok must not edit.
 
