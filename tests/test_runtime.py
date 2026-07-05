@@ -654,6 +654,70 @@ class GoalRuntimeTests(unittest.TestCase):
             self.assertIn("--sandbox read-only", log_text)
             self.assertIn("--ephemeral", log_text)
 
+    def test_claude_code_file_tik_uses_single_artifact_write_disallowed_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            run_dir = root / ".goal" / "runs" / "heartbeat-0001"
+            run_dir.mkdir(parents=True)
+            artifact = root / "output" / "artifact.pdf"
+            artifact.parent.mkdir()
+            artifact.write_text("fake pdf content\n", encoding="utf-8")
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            fake_claude = bin_dir / "claude"
+            fake_claude.write_text(
+                textwrap.dedent(
+                    """
+                    #!/usr/bin/env python3
+                    import json
+                    import sys
+                    from pathlib import Path
+
+                    args = sys.argv[1:]
+                    assert "--print" in args
+                    assert args[args.index("--output-format") + 1] == "json"
+                    disallowed = args[args.index("--disallowedTools") + 1]
+                    for tool in ("Write", "Edit", "NotebookEdit", "Bash"):
+                        assert tool in disallowed
+                    workspace = Path.cwd()
+                    assert sorted(path.name for path in workspace.iterdir()) == ["full_paper.pdf"]
+                    prompt = sys.stdin.read()
+                    assert prompt.startswith("/apsr-review\\n")
+                    assert "configured review prompt" in prompt
+                    memo = json.dumps({
+                        "artifact_ready": False,
+                        "central_bottleneck": "needs evidence",
+                        "blocking_objections": [{"severity": "blocking", "objection": "thin evidence"}],
+                        "required_next_artifact_changes": ["add evidence"]
+                    })
+                    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": memo}))
+                    """
+                ).strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            fake_claude.chmod(0o755)
+            old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = f"{bin_dir}{os.pathsep}{old_path}"
+            try:
+                memo_path = run_tik(
+                    TikConfig(provider="claude_code_file", prompt=""),
+                    root,
+                    artifact,
+                    "/apsr-review\n\nconfigured review prompt",
+                    run_dir,
+                    "tik",
+                    "full_paper.pdf",
+                )
+            finally:
+                os.environ["PATH"] = old_path
+
+            self.assertEqual(memo_path, run_dir / "tik_memo.md")
+            self.assertIn("thin evidence", memo_path.read_text(encoding="utf-8"))
+            log_text = (run_dir / "tik_claude_code_file.log").read_text(encoding="utf-8")
+            self.assertIn("--output-format json", log_text)
+            self.assertIn("--disallowedTools", log_text)
+
     def test_missing_codex_blocks_without_uncaught_exception(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

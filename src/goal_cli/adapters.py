@@ -158,6 +158,8 @@ def run_tik(
             ok = _openai_review(config, tik_artifact, prompt, output_path, run_dir / f"{label}_openai.log", model, timeout_seconds)
         elif config.provider == "codex_file":
             ok = _codex_file_review(config, tik_artifact, prompt, output_path, run_dir / f"{label}_codex_file.log", timeout_seconds)
+        elif config.provider == "claude_code_file":
+            ok = _claude_code_file_review(config, tik_artifact, prompt, output_path, run_dir / f"{label}_claude_code_file.log", timeout_seconds)
         else:
             raise ValueError(f"unsupported tik provider: {config.provider}")
 
@@ -201,7 +203,7 @@ def _codex_file_review(
     command.append("-")
 
     effective_timeout = min(config.timeout_seconds, timeout_seconds) if timeout_seconds is not None else config.timeout_seconds
-    ok = run_command_logged(command, artifact_path.parent, log_path, _codex_file_prompt(prompt), timeout_seconds=effective_timeout)
+    ok = run_command_logged(command, artifact_path.parent, log_path, _file_review_prompt(prompt), timeout_seconds=effective_timeout)
     if not ok:
         return False
     if not output_path.exists():
@@ -213,7 +215,98 @@ def _codex_file_review(
     return True
 
 
-def _codex_file_prompt(prompt: str) -> str:
+CLAUDE_CODE_DISALLOWED_TOOLS = "Write,Edit,MultiEdit,NotebookEdit,Bash"
+
+
+def _claude_code_file_review(
+    config: TikConfig,
+    artifact_path: Path,
+    prompt: str,
+    output_path: Path,
+    log_path: Path,
+    timeout_seconds: float | None = None,
+) -> bool:
+    artifact_size = artifact_path.stat().st_size
+    if artifact_size > config.max_file_size_bytes:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(
+            f"ERROR: artifact is {artifact_size} bytes, larger than max_file_size_bytes={config.max_file_size_bytes}.\n",
+            encoding="utf-8",
+        )
+        return False
+
+    command = [
+        "claude",
+        "--print",
+        "--output-format",
+        "json",
+        "--disallowedTools",
+        CLAUDE_CODE_DISALLOWED_TOOLS,
+    ]
+    if config.model:
+        command.extend(["--model", config.model])
+
+    effective_timeout = min(config.timeout_seconds, timeout_seconds) if timeout_seconds is not None else config.timeout_seconds
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8") as log_file:
+        log_file.write(f"$ {' '.join(shlex.quote(part) for part in command)}\n# cwd: {artifact_path.parent}\n\n")
+        log_file.flush()
+        if _timeout_exhausted(effective_timeout, log_file):
+            return False
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=artifact_path.parent,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            _log_launch_error(log_file, exc)
+            return False
+        try:
+            stdout, stderr = process.communicate(input=_file_review_prompt(prompt), timeout=effective_timeout)
+        except subprocess.TimeoutExpired:
+            _terminate_process_tree(process)
+            stdout, stderr = process.communicate()
+            if stdout:
+                log_file.write(stdout)
+            if stderr:
+                log_file.write(stderr)
+            timeout_label = f"{effective_timeout:g}" if effective_timeout is not None else "unknown"
+            log_file.write(f"\nERROR: command timed out after {timeout_label} seconds.\n")
+            return False
+        if stdout:
+            log_file.write(stdout)
+        if stderr:
+            log_file.write(stderr)
+        if process.returncode != 0:
+            log_file.write(f"\nERROR: claude exited with status {process.returncode}.\n")
+            return False
+        memo_text = _claude_code_result_text(stdout or "")
+        if not memo_text.strip():
+            log_file.write("\nERROR: claude_code_file returned no extractable result text.\n")
+            return False
+        output_path.write_text(memo_text, encoding="utf-8")
+        return True
+
+
+def _claude_code_result_text(stdout: str) -> str:
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(payload, dict) or payload.get("is_error"):
+        return ""
+    result = payload.get("result")
+    if isinstance(result, str) and result.strip():
+        return result.strip() + "\n"
+    return ""
+
+
+def _file_review_prompt(prompt: str) -> str:
     slash_command, body = _split_leading_slash_command(prompt)
     if slash_command:
         return f"{slash_command}\n\n{body}"

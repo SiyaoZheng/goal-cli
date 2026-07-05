@@ -83,8 +83,9 @@ with:
 }
 ```
 
-For `codex_file` templates, write a concise artifact-only prompt. If a slash
-skill is required, it must be the first line of the prompt.
+For `codex_file` and `claude_code_file` templates, write a concise
+artifact-only prompt. If a slash skill is required, it must be the first line
+of the prompt.
 
 For `agent` templates, state the OpenAI package and `OPENAI_API_KEY`
 requirements and keep `store = false` unless the template explicitly requires

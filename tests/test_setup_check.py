@@ -120,6 +120,40 @@ class SetupCheckTests(unittest.TestCase):
             self.assertEqual(self._detail(checks, "one_click_artifact_loop"), "ready for one-prompt goal-cli run")
             self.assertEqual(project_source.read_text(encoding="utf-8"), before)
 
+    def test_claude_code_file_tik_smoke_uses_temp_artifact_and_validates_verdict(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_project(root, tik_provider="claude_code_file")
+            self._install_fake_codex(root)
+            self._install_fake_claude(root)
+            project_source = root / "src" / "source.txt"
+            before = project_source.read_text(encoding="utf-8")
+
+            checks = run_doctor(
+                load_config(root / "goal.toml"),
+                DoctorOptions(smoke_codex_goal=True, smoke_claude_code_file_tik=True),
+            )
+
+            self.assertEqual(doctor_exit_code(checks), 0, checks)
+            self.assertIn("claude found at", self._detail(checks, "claude.binary"))
+            self.assertIn("claude supports --print", self._detail(checks, "claude.--print"))
+            self.assertIn("parseable current-artifact verdict", self._detail(checks, "claude_code_file_tik.smoke"))
+            self.assertEqual(self._detail(checks, "one_click_artifact_loop"), "ready for one-prompt goal-cli run")
+            self.assertEqual(project_source.read_text(encoding="utf-8"), before)
+
+    def test_doctor_fails_when_claude_help_lacks_disallowed_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_project(root, tik_provider="claude_code_file")
+            self._install_fake_codex(root)
+            self._install_fake_claude(root, include_disallowed_tools=False)
+
+            checks = run_doctor(load_config(root / "goal.toml"))
+
+            self.assertEqual(doctor_exit_code(checks), 1)
+            self.assertIn("does not show --disallowedTools", self._detail(checks, "claude.--disallowedTools"))
+            self.assertIn("claude.--disallowedTools", self._detail(checks, "one_click_artifact_loop"))
+
     def test_doctor_resolves_relative_no_mistakes_binary_from_project_root(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -183,6 +217,13 @@ class SetupCheckTests(unittest.TestCase):
                 """
                 [tik]
                 provider = "codex_file"
+                """
+            ).strip()
+        elif tik_provider == "claude_code_file":
+            tik_table = textwrap.dedent(
+                """
+                [tik]
+                provider = "claude_code_file"
                 """
             ).strip()
         else:
@@ -290,6 +331,57 @@ generated_dirs = ["output", "build"]
             encoding="utf-8",
         )
         fake_codex.chmod(0o755)
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{old_path}"
+        self.addCleanup(lambda: os.environ.__setitem__("PATH", old_path))
+
+    def _install_fake_claude(self, root: Path, include_disallowed_tools: bool = True) -> None:
+        bin_dir = root / "claude-bin"
+        bin_dir.mkdir()
+        fake_claude = bin_dir / "claude"
+        help_flags = ["--print", "--output-format", "--model"]
+        if include_disallowed_tools:
+            help_flags.append("--disallowedTools")
+        help_text = " ".join(help_flags)
+        fake_claude.write_text(
+            textwrap.dedent(
+                f"""
+                #!/usr/bin/env python3
+                import json
+                import sys
+                from pathlib import Path
+
+                args = sys.argv[1:]
+                if args == ["--help"]:
+                    print({help_text!r})
+                    raise SystemExit(0)
+
+                assert "--print" in args
+                assert args[args.index("--output-format") + 1] == "json"
+                disallowed = args[args.index("--disallowedTools") + 1]
+                assert "Write" in disallowed and "Edit" in disallowed and "Bash" in disallowed
+                workspace = Path.cwd()
+                assert sorted(path.name for path in workspace.iterdir()) == ["doctor-artifact.txt"]
+                prompt = sys.stdin.read()
+                assert "Doctor smoke check for goal-cli claude_code_file tik readiness" in prompt
+                assert "doctor-artifact.txt" in prompt
+                memo = json.dumps({{
+                    "artifact_ready": False,
+                    "central_bottleneck": "doctor smoke bottleneck",
+                    "blocking_objections": [{{
+                        "severity": "blocking",
+                        "objection": "doctor smoke objection",
+                        "artifact_evidence": "doctor-artifact.txt"
+                    }}],
+                    "required_next_artifact_changes": ["doctor smoke change"]
+                }})
+                print(json.dumps({{"type": "result", "subtype": "success", "is_error": False, "result": memo}}))
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        fake_claude.chmod(0o755)
         old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = f"{bin_dir}{os.pathsep}{old_path}"
         self.addCleanup(lambda: os.environ.__setitem__("PATH", old_path))

@@ -249,6 +249,16 @@ max_file_size_bytes = 25000000
 max_output_tokens = 4096
 ```
 
+Use `claude_code_file` when a local Claude Code artifact review is appropriate
+and the artifact is a file; it needs the `claude` CLI on `PATH`:
+
+```toml
+[tik]
+provider = "claude_code_file"
+timeout_seconds = 1800
+max_file_size_bytes = 25000000
+```
+
 Use `agent` only when OpenAI Responses API file upload is intended and
 `OPENAI_API_KEY` is available:
 
@@ -380,6 +390,12 @@ If using `tik.provider = "codex_file"`:
 goal-cli doctor --smoke-codex-goal --smoke-codex-file-tik
 ```
 
+If using `tik.provider = "claude_code_file"`:
+
+```bash
+goal-cli doctor --smoke-codex-goal --smoke-claude-code-file-tik
+```
+
 Run the producer directly once and prove the artifact exists:
 
 ```bash
@@ -434,7 +450,8 @@ Use these rules when setup does not pass on the first attempt:
 
 - Artifact: `output/full_paper.pdf`.
 - Producer: `make all` or `python3 scripts/orchestrator.py --full`.
-- Tik: `codex_file` with a journal-review prompt or deterministic PDF checks.
+- Tik: `codex_file` or `claude_code_file` with a journal-review prompt, or
+  deterministic PDF checks.
 - Tok write dirs: `writing`, `src`, `tables`, `figures` if these are source.
 - Generated dirs: `output`, `build`, `cache`.
 
@@ -442,8 +459,8 @@ Use these rules when setup does not pass on the first attempt:
 
 - Artifact: `dist/index.html` plus any build manifest.
 - Producer: `npm run build`.
-- Tik: oracle smoke test if Playwright tests exist; otherwise `codex_file` on a
-  generated report file.
+- Tik: oracle smoke test if Playwright tests exist; otherwise `codex_file` or
+  `claude_code_file` on a generated report file.
 - Tok write dirs: `src`, `app`, `components`, `pages`, `public` only when
   source assets live there.
 - Generated dirs: `dist`, `build`, `.next`, `coverage`.

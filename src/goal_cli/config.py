@@ -372,7 +372,7 @@ def analyze_config_policy(config: GoalConfig) -> ConfigPolicyReport:
     issues: list[ConfigIssue] = []
     if not _inside(config.root, config.path):
         issues.append(ConfigIssue("config.outside_root", f"config file must be inside project root: {config.path}"))
-    if config.tik.provider not in {"oracle", "agent", "codex_file"}:
+    if config.tik.provider not in {"oracle", "agent", "codex_file", "claude_code_file"}:
         issues.append(ConfigIssue("tik.provider.unsupported", f"unsupported tik provider: {config.tik.provider}"))
     if config.tok.provider != "codex_goal":
         issues.append(ConfigIssue("tok.provider.unsupported", f"unsupported tok provider: {config.tok.provider}"))

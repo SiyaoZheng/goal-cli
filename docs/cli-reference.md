@@ -59,7 +59,7 @@ options:
 
 ```text
 usage: goal-cli doctor [-h] [--smoke-codex-goal] [--smoke-codex-file-tik]
-                       [--skip-openai-auth]
+                       [--smoke-claude-code-file-tik] [--skip-openai-auth]
                        [--timeout-seconds TIMEOUT_SECONDS]
                        [--smoke-timeout-seconds SMOKE_TIMEOUT_SECONDS]
 
@@ -73,6 +73,9 @@ options:
   --smoke-codex-file-tik
                         Run a minimal Codex local-file tik smoke check in a
                         temp directory
+  --smoke-claude-code-file-tik
+                        Run a minimal Claude Code local-file tik smoke check
+                        in a temp directory
   --skip-openai-auth    Skip OPENAI_API_KEY readiness check for agent tik
                         configs
   --timeout-seconds TIMEOUT_SECONDS

@@ -8,6 +8,7 @@ repository, then pointed at a project-specific `goal.toml`.
 - Python 3.11 or newer.
 - Git.
 - Codex CLI on `PATH` for the production tok and `codex_file` tik.
+- Claude Code CLI (`claude`) on `PATH` when `tik.provider = "claude_code_file"`.
 - `OPENAI_API_KEY` when `tik.provider = "agent"`.
 - `no-mistakes`.
 - An OTLP-compatible OpenTelemetry receiver when you want external trace
@@ -320,6 +321,12 @@ For `tik.provider = "codex_file"`, prove the local-file tik path too:
 
 ```bash
 goal-cli doctor --smoke-codex-goal --smoke-codex-file-tik
+```
+
+For `tik.provider = "claude_code_file"`:
+
+```bash
+goal-cli doctor --smoke-codex-goal --smoke-claude-code-file-tik
 ```
 
 Run one heartbeat:

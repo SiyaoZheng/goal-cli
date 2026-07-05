@@ -110,10 +110,11 @@ After the producer, the runtime has exactly two sequential roles:
 
 - Tik: judges the finished thing and writes `tik.md`. Public tik modes are
   `oracle` for deterministic scripts, tests, metrics, or other machine
-  evaluators; `agent` for Responses API file-upload evaluation; and
-  `codex_file` for Codex evaluation of a local artifact copy in an ephemeral
-  read-only workspace. If tik reports a stale artifact hash, the heartbeat
-  blocks before tok.
+  evaluators; `agent` for Responses API file-upload evaluation; `codex_file`
+  for Codex evaluation of a local artifact copy in an ephemeral read-only
+  workspace; and `claude_code_file` for Claude Code evaluation of a local
+  artifact copy with write tools disallowed. If tik reports a stale artifact
+  hash, the heartbeat blocks before tok.
 - Tok: reads `tik.md` and changes allowed source so the next artifact can
   answer the blocking objections. The default mode is `codex_goal`.
 

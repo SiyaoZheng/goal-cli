@@ -44,7 +44,7 @@ accepted from source edits alone.
 
 ## Tik
 
-Tik has three public modes.
+Tik has four public modes.
 
 ```toml
 [tik]
@@ -86,8 +86,25 @@ upload. The configured artifact is copied into a temporary directory, Codex is
 launched with that directory as its workspace under a read-only sandbox, with no
 project source directories added to the session, and with ephemeral session
 state.
-If the configured tik prompt starts with a slash skill such as `/apsr-review`,
-goal-cli keeps that slash command as the first stdin line.
+
+```toml
+[tik]
+provider = "claude_code_file"
+# model = "optional model override"
+timeout_seconds = 1800
+max_file_size_bytes = 25000000
+```
+
+Use `claude_code_file` for Claude Code-based artifact critique. The configured
+artifact is copied into a temporary directory, `claude --print` is launched
+with that directory as its working directory, with no project source
+directories in the workspace, and with `Write`, `Edit`, `NotebookEdit`, and
+`Bash` explicitly disallowed so the pass is read-only. The memo is extracted
+from the `result` field of the `--output-format json` envelope.
+
+For both `codex_file` and `claude_code_file`, if the configured tik prompt
+starts with a slash skill such as `/apsr-review`, goal-cli keeps that slash
+command as the first stdin line.
 
 Tik output must contain a JSON object with the configured verdict fields:
 

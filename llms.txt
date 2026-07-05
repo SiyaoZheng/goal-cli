@@ -87,6 +87,7 @@ goal-cli -h
 6. Choose the smallest useful tik:
    - deterministic `oracle` when a script can reject bad output;
    - `codex_file` when Codex can review a local artifact file;
+   - `claude_code_file` when Claude Code can review a local artifact file;
    - `agent` only when OpenAI file upload is intended and credentials exist.
 7. Configure `tok` with narrow source `write_dirs` as the audited source-change
    scope, `run_cwd = "."` when useful, and generated `runtime_write_dirs` only
@@ -112,6 +113,12 @@ If using `tik.provider = "codex_file"`:
 
 ```bash
 goal-cli doctor --smoke-codex-goal --smoke-codex-file-tik
+```
+
+If using `tik.provider = "claude_code_file"`:
+
+```bash
+goal-cli doctor --smoke-codex-goal --smoke-claude-code-file-tik
 ```
 
 Run the producer directly and prove the artifact exists:
