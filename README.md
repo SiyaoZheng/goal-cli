@@ -1,46 +1,51 @@
-<div align="center">
-  <img src=".github/assets/goal-cli-logo-generated.png" alt="goal-cli logo" width="360" />
+<br />
 
-  <p><strong>Stop grading autonomous agents by chat logs. Grade the artifact.</strong></p>
-
-  <p>
-    <a href="https://github.com/SiyaoZheng/goal-cli"><img alt="GitHub repository" src="https://img.shields.io/badge/GitHub-SiyaoZheng%2Fgoal--cli-111827?logo=github"></a>
-    <img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11%2B-0F766E?logo=python&logoColor=white">
-    <img alt="Version 0.1.0" src="https://img.shields.io/badge/version-0.1.0-7C3AED">
-    <img alt="OpenTelemetry" src="https://img.shields.io/badge/traces-OpenTelemetry-1F2937?logo=opentelemetry&logoColor=white">
-    <img alt="Local first" src="https://img.shields.io/badge/local--first-runtime-166534">
-  </p>
-
-  <p>
-    <a href="#quick-start">Quick Start</a>
-    <span> . </span>
-    <a href="#why-this-is-different">Why Different</a>
-    <span> . </span>
-    <a href="#the-heartbeat">Heartbeat</a>
-    <span> . </span>
-    <a href="#configuration">Config</a>
-    <span> . </span>
-    <a href="#docs">Docs</a>
-  </p>
-</div>
+<table>
+  <tr>
+    <td width="62%" valign="middle">
+      <h1>Master Coding Agent for Non-Coders</h1>
+      <p><strong><code>goal-cli</code> is a master control layer for coding agents.</strong></p>
+      <p>Run coding agents through papers, posters, financial reports, sell-side research, and small apps you can inspect.</p>
+      <p>
+        <a href="#install"><strong>Run a heartbeat</strong></a>
+        &nbsp;|&nbsp;
+        <a href="#the-loop">See the control loop</a>
+        &nbsp;|&nbsp;
+        <a href="#configuration">Define the artifact</a>
+      </p>
+      <p>
+        <kbd>Python 3.11+</kbd>
+        <kbd>for non-coders</kbd>
+        <kbd>artifact-first</kbd>
+        <kbd>local-first</kbd>
+      </p>
+    </td>
+    <td width="38%" align="center" valign="middle">
+      <img src=".github/assets/goal-cli-logo-generated.png" alt="goal-cli logo" width="300" />
+    </td>
+  </tr>
+</table>
 
 ---
 
-Most agent runners celebrate activity: files edited, commands run, tokens
-spent, plans updated. `goal-cli` is built around a harder standard:
+> You do not need to read every diff to demand proof.
 
-> The goal is not complete until the canonical artifact is rebuilt and passes
-> its evaluator.
+Coding agents are useful. Their transcripts are not proof. `goal-cli` gives
+non-coders a control loop above the coding agent: define the output, rebuild it
+every heartbeat, let a separate critic review the artifact, and only repair
+source when the artifact fails.
 
-Give `goal-cli` one artifact, one producer command, one critic, and a bounded
-source surface. Each heartbeat rebuilds the artifact, lets `tik` judge only
-that artifact, and lets `tok` repair sources only when the artifact fails. The
-repair pass never gets to declare victory. Only a later rebuild and passing
-artifact review can finish the goal.
+## Who It Helps
 
-## Quick Start
+| You are | The artifact you can judge | What the agent must prove |
+| --- | --- | --- |
+| Scholar | Paper, appendix, replication packet | The PDF rebuilds and the critique points at the artifact, not the chat. |
+| Designer | Poster, landing page, campaign visual | The exported page or image matches the brief you can see. |
+| Hobbyist | Your own small app | The app runs, the demo changes, and the next heartbeat shows it. |
+| Accountant | Financial report, workbook, reconciliation export | Tables, numbers, and files regenerate before you review them. |
+| Brokerage analyst | Sell-side research report, chart pack, sector note | Charts, tables, wording, and sources update in the rebuilt report. |
 
-Install from this checkout:
+## Install
 
 ```bash
 python3 -m venv .venv
@@ -49,18 +54,13 @@ python3 -m pip install --upgrade pip
 python3 -m pip install -e .
 ```
 
-Create a goal:
+Create, validate, and run a goal:
 
 ```bash
 goal-cli init
 $EDITOR goal.toml
 goal-cli validate
 goal-cli doctor
-```
-
-Run one heartbeat:
-
-```bash
 goal-cli run
 goal-cli state
 ```
@@ -77,57 +77,69 @@ Use `goal-cli doctor --smoke-codex-goal` when setup should prove the internal
 Codex `/goal` tok path too. Use `--skip-openai-auth` only when auth is supplied
 outside the environment.
 
-## Why This Is Different
-
-`goal-cli` is not a generic task runner, a chat wrapper, or a todo loop. It is
-an artifact runtime.
-
-| Ordinary agent loop | `goal-cli` |
-| --- | --- |
-| "The agent says it improved the paper." | The PDF is rebuilt, opened by `tik`, and judged as the submitted artifact. |
-| "The agent edited a benchmark script." | The benchmark result is regenerated and evaluated before the goal can pass. |
-| "The agent made website changes." | The site artifact is produced first; source repair follows only from artifact critique. |
-| "The run got long and state lived in chat." | State, prompts, ledgers, reports, locks, and traces live under `.goal/`. |
-| "The repair pass declared success." | `tok` can only change sources; completion belongs to the next artifact review. |
-
-This makes it useful for projects where the product is concrete:
-
-- publication PDFs
-- benchmark reports
-- generated websites
-- model checkpoints
-- datasets and codebooks
-- slide decks and long-form reports
-- packages that must build and pass checks
-
-## The Heartbeat
+## The Loop
 
 ```mermaid
 flowchart LR
-    A["goal.toml"] --> B["producer"]
-    B --> C["canonical artifact"]
-    C --> D{"tik"}
-    D -- "artifact passes" --> E["complete"]
-    D -- "artifact fails" --> F["tik.md"]
-    F --> G["tok"]
-    G --> H["source repair report"]
-    H --> I["next heartbeat"]
-    I --> B
+    config["goal.toml"] --> producer["producer command"]
+    producer --> artifact["canonical artifact"]
+    artifact --> tik{"tik review"}
+    tik -- "passes" --> complete["complete"]
+    tik -- "fails" --> report["tik.md"]
+    report --> tok["tok source repair"]
+    tok --> next["next heartbeat"]
+    next --> producer
 ```
 
-One `goal-cli run` executes one bounded heartbeat:
+<table>
+  <tr>
+    <td width="25%" valign="top">
+      <h3>Rebuild</h3>
+      <p>The producer command creates the artifact first. Missing output is failure, not progress.</p>
+    </td>
+    <td width="25%" valign="top">
+      <h3>Review</h3>
+      <p><code>tik</code> critiques the artifact itself and writes the machine handoff.</p>
+    </td>
+    <td width="25%" valign="top">
+      <h3>Repair</h3>
+      <p><code>tok</code> reads <code>tik.md</code> and edits only the allowed source surface.</p>
+    </td>
+    <td width="25%" valign="top">
+      <h3>Prove</h3>
+      <p>The next heartbeat rebuilds the product and lets <code>tik</code> judge the new artifact.</p>
+    </td>
+  </tr>
+</table>
 
-1. Load file-backed state and acquire a lock.
-2. Run the producer command.
-3. Verify the canonical artifact exists.
-4. Run `tik` against the artifact and write `tik.md`.
-5. If `tik` passes, mark the artifact-level goal complete.
-6. If `tik` fails, launch one bounded `tok` source-repair pass.
-7. Validate the tok JSON report, record state, and exit.
+One run is one heartbeat:
 
-The design is intentionally asymmetric. `tok` is allowed to improve sources,
-but it is not allowed to complete the goal directly. A later heartbeat must
-rebuild the product and let `tik` judge the result.
+| Runtime action | Boundary |
+| --- | --- |
+| Load file-backed state and acquire a lock | A heartbeat is single-owner. |
+| Run the producer command | The artifact must exist before critique. |
+| Run `tik` against the artifact | The critic sees the product, not the source diff. |
+| Launch `tok` only on failure | Repair stays inside configured writable scopes. |
+| Record state and exit | Liveness is explicit and recoverable. |
+
+## Why It Exists
+
+| When coding agents feel like magic | `goal-cli` gives you a handle |
+| --- | --- |
+| "The agent says it fixed the app." | The site or build artifact is regenerated before the goal can pass. |
+| "I cannot audit the diff." | Judge the artifact: paper, poster, report, research report, dataset, or app. |
+| "The chat got too long to trust." | State, prompts, reports, locks, and traces live under `.goal/`. |
+| "The repair pass declared success." | `tok` can only change sources. Completion belongs to artifact review. |
+| "I need a stronger final standard." | `tik` reviews the artifact after rebuild, not the agent's explanation. |
+
+You stay in charge of the parts you can judge:
+
+| You decide | `goal-cli` enforces |
+| --- | --- |
+| The artifact that counts | The producer must rebuild it before any success claim matters. |
+| The review standard | `tik` critiques the artifact and writes `tik.md` for the repair pass. |
+| The writable surface | `tok` repairs only the configured source directories. |
+| The heartbeat | Every run records state, traces, reports, and the next action. |
 
 ## Configuration
 
@@ -166,8 +178,8 @@ For a PDF-first research workflow:
 cp examples/scientificity/goal.toml ./goal.toml
 ```
 
-Then edit artifact paths, write scopes, model names, and the producer command
-for that repository.
+Then edit artifact paths, write scopes, tik provider settings, and the producer
+command for that repository.
 
 ## Runtime Roles
 
@@ -182,7 +194,9 @@ for that repository.
 Public `tik` modes:
 
 - `oracle`: deterministic scripts, tests, metrics, or machine checks.
-- `agent`: model-based artifact critique.
+- `agent`: OpenAI Responses API file-upload artifact critique.
+- `codex_file`: Codex critique of a local artifact copy in a read-only
+  single-file workspace.
 
 Production `tok` mode:
 
@@ -202,7 +216,8 @@ Production `tok` mode:
 | `goal-cli state` | Print `.goal/state.json` or the default initial state. |
 | `goal-cli reset` | Remove state and stale locks while preserving run artifacts. |
 
-## Observability
+<details>
+  <summary><strong>Observability</strong></summary>
 
 OpenTelemetry tracing is enabled by default. Runtime spans cover the heartbeat,
 producer, artifact load, tik, tok, and no-mistakes gate.
@@ -235,8 +250,10 @@ docker run --rm --name goal-cli-otel \
   otel/opentelemetry-collector-contrib:latest \
   --config=/etc/otelcol-contrib/config.yaml
 ```
+</details>
 
-## Git Gate
+<details>
+  <summary><strong>Git Gate</strong></summary>
 
 `goal-cli` can hand committed checkpoints to
 [`kunchenguid/no-mistakes`](https://github.com/kunchenguid/no-mistakes).
@@ -255,10 +272,12 @@ repo is on the default branch, `goal-cli` creates a `goal-cli/...` feature
 branch. Runtime files under `.goal/` are excluded through `.git/info/exclude`.
 
 `mode = "lightspeed"` uses no-mistakes with high-latency steps skipped. Use
-`mode = "fast"` or `mode = "full"` when a branch needs stronger local or release
-gates.
+`mode = "fast"` or `mode = "full"` when a branch needs stronger local or
+release gates.
+</details>
 
-## Internal Shape
+<details>
+  <summary><strong>Internal Shape</strong></summary>
 
 The implementation keeps four seams narrow:
 
@@ -268,6 +287,7 @@ The implementation keeps four seams narrow:
 | Heartbeat State | `HeartbeatRecorder` owns state, history, heartbeat emission, transitions, and no-mistakes state recording. |
 | Tok Execution | `tok_execution` owns Codex `/goal` command construction, JSON Schema validation, prompt files, reports, and diagnostics. |
 | Readiness and Telemetry | `doctor` and runtime share tok execution and `TelemetryExportPlan`, so setup checks describe the real path. |
+</details>
 
 ## Development
 
@@ -280,12 +300,14 @@ goal-cli --help
 
 ## Docs
 
-- [Installing goal-cli](docs/installation.md)
-- [goal.toml schema](docs/config-schema.md)
-- [Artifact-centered design notes](docs/artifact-goal-notes.md)
-- [Codex goal implementation report](docs/codex-goal-openai-implementation-report.md)
-- [PDF-first example goal](examples/scientificity/goal.toml)
-- [OpenTelemetry Collector file exporter config](docs/otel-collector-file.yaml)
+| Document | Purpose |
+| --- | --- |
+| [Installing goal-cli](docs/installation.md) | Setup path and environment expectations. |
+| [goal.toml schema](docs/config-schema.md) | Full configuration reference. |
+| [Artifact-centered design notes](docs/artifact-goal-notes.md) | Product model and runtime rationale. |
+| [Codex goal implementation report](docs/codex-goal-openai-implementation-report.md) | Codex `/goal` tok implementation details. |
+| [PDF-first example goal](examples/scientificity/goal.toml) | Example workflow for research artifacts. |
+| [OpenTelemetry Collector file exporter config](docs/otel-collector-file.yaml) | Local collector setup. |
 
 ## Status
 
