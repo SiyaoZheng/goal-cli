@@ -21,6 +21,8 @@
   <a href="#configure-goaltoml">Config</a>
   &nbsp;/&nbsp;
   <a href="#command-deck">Commands</a>
+  &nbsp;/&nbsp;
+  <a href="#agent-skills">Skills</a>
 </p>
 
 <p align="center">
@@ -91,6 +93,22 @@ single-file artifact copy and return a parseable tik verdict.
 
 Use `--skip-openai-auth` only when auth is supplied outside the environment.
 </details>
+
+## Agent Skills
+
+For non-expert setup, give your coding agent the root
+[`llms.txt`](llms.txt) prompt or the
+[`goal-cli-project-setup`](skills/goal-cli-project-setup/SKILL.md) skill. That
+skill tells the agent how to discover the canonical artifact, synthesize a
+stable producer command, write `goal.toml`, protect generated outputs, and run
+the safe validation checks before the first real heartbeat.
+
+Maintainers who add reusable recipes, tik oracle scripts, or project-family
+examples should use
+[`goal-cli-template-author`](skills/goal-cli-template-author/SKILL.md).
+
+See [goal-cli Skills](docs/skills.md) for copy-paste agent instructions and
+installation notes.
 
 ## Choose the Artifact
 
@@ -345,6 +363,7 @@ goal-cli --help
 | [CLI reference](docs/cli-reference.md) | Current `goal-cli -h` and high-use subcommand help surfaces. |
 | [Installing goal-cli](docs/installation.md) | Setup path and environment expectations. |
 | [goal.toml schema](docs/config-schema.md) | Full configuration reference. |
+| [goal-cli Skills](docs/skills.md) | Agent-facing setup skills and the one-click prompt. |
 | [Artifact-centered design notes](docs/artifact-goal-notes.md) | Product model and runtime rationale. |
 | [Codex goal implementation report](docs/codex-goal-openai-implementation-report.md) | Codex `/goal` tok implementation details. |
 | [PDF-first example goal](examples/scientificity/goal.toml) | Example workflow for research artifacts. |

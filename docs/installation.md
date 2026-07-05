@@ -162,6 +162,12 @@ Create a starter config:
 goal-cli init
 ```
 
+If a coding agent is doing setup for a non-expert user, start from the root
+[`llms.txt`](../llms.txt) prompt or the
+[`goal-cli-project-setup`](../skills/goal-cli-project-setup/SKILL.md) skill.
+That setup path includes producer synthesis, `goal.toml` generation, and safe
+validation checks before the first real heartbeat.
+
 Then edit `goal.toml` so:
 
 - `[artifact].path` is the one canonical product.
