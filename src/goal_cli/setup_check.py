@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .config import ConfigPolicyReport, GoalConfig, TokConfig, analyze_config_policy
-from .no_mistakes import no_mistakes_axi_run_help_command, no_mistakes_help_supports_required_flags
+from .no_mistakes import no_mistakes_axi_run_help_command, no_mistakes_help_supports_required_flags, resolve_no_mistakes_binary
 from .observability import plan_observability_export
 from .tok_execution import execute_tok
 
@@ -63,6 +63,7 @@ class DoctorOptions:
     smoke_codex_goal: bool = False
     skip_openai_auth: bool = False
     timeout_seconds: float = 10.0
+    smoke_timeout_seconds: float = 180.0
 
 
 @dataclass(frozen=True)
@@ -158,7 +159,7 @@ class LocalSetupProbeAdapter:
                 "Create doctor-smoke.txt in the current temporary writable directory, then return a JSON tok report with "
                 "source_change_possible true, sources_changed [\"doctor-smoke.txt\"], and a concise remaining_artifact_bottleneck.\n"
             )
-            result = execute_tok(smoke_config, prompt, run_dir, timeout_seconds=options.timeout_seconds)
+            result = execute_tok(smoke_config, prompt, run_dir, timeout_seconds=options.smoke_timeout_seconds)
             if not result.ok:
                 detail = f"codex_goal smoke failed: {result.detail}"
                 if result.plan and result.plan.log_path.exists():
@@ -296,7 +297,7 @@ def _no_mistakes_checks(config: GoalConfig, options: DoctorOptions, probes: Setu
     if not config.no_mistakes.enabled:
         return []
 
-    resolved = _resolve_executable(config.no_mistakes.binary, config.root, probes)
+    resolved = resolve_no_mistakes_binary(config, probes.which)
     if resolved is None:
         return [
             DoctorCheck(

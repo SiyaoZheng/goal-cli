@@ -6,13 +6,14 @@ import json
 import os
 import re
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .adapters import GoalProviderAdapters, ProductionGoalProviderAdapters
 from .config import GoalConfig, TERMINAL_STATUSES, validate_config
-from .no_mistakes import NoMistakesGate, NoMistakesResult
+from .no_mistakes import NO_MISTAKES_BUDGET_EXHAUSTED, NoMistakesGate, NoMistakesResult
 from .observability import (
     GoalTelemetry,
     configure_observability,
@@ -28,7 +29,6 @@ from .template import render_template
 class RuntimeOptions:
     dry_run: bool = False
     review_only: bool = False
-    max_cycles: int = 15
     max_minutes: float = 30.0
 
 
@@ -40,8 +40,12 @@ class RunResult:
     message: str
 
 
+class HeartbeatLockError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
-class ArtifactCycleRecorder:
+class HeartbeatRecorder:
     config: GoalConfig
     state: dict[str, Any]
     telemetry: GoalTelemetry
@@ -72,6 +76,8 @@ class ArtifactCycleRecorder:
         self.state["next_action"] = next_action
         if blocked_reason is not None:
             self.state["blocked_reason"] = blocked_reason
+        elif status in {"active", "complete"}:
+            self.state.pop("blocked_reason", None)
         self.append_event(event, run_dir, artifact)
         save_state(self.config, self.state)
 
@@ -105,30 +111,62 @@ class HeartbeatLock:
         self.lock_path = lock_path
         self.stale_seconds = stale_seconds
         self.acquired = False
+        self.payload: dict[str, Any] | None = None
 
     def __enter__(self) -> "HeartbeatLock":
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-        if self.lock_path.exists():
-            age = time.time() - self.lock_path.stat().st_mtime
+        while True:
+            try:
+                stat_result = self.lock_path.stat()
+            except FileNotFoundError:
+                break
+            age = time.time() - stat_result.st_mtime
             if age > self.stale_seconds or _lock_process_is_dead(self.lock_path):
-                self.lock_path.unlink()
-            else:
-                raise RuntimeError(f"heartbeat already running: {self.lock_path}")
-        fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                stale_path = self.lock_path.with_name(f"{self.lock_path.name}.stale-{os.getpid()}-{uuid.uuid4().hex}")
+                try:
+                    os.rename(self.lock_path, stale_path)
+                except FileNotFoundError:
+                    break
+                except OSError as exc:
+                    raise HeartbeatLockError(f"heartbeat already running: {self.lock_path}") from exc
+                try:
+                    stale_path.unlink()
+                except OSError:
+                    pass
+                break
+            raise HeartbeatLockError(f"heartbeat already running: {self.lock_path}")
+        try:
+            fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError as exc:
+            raise HeartbeatLockError(f"heartbeat already running: {self.lock_path}") from exc
+        self.payload = {"pid": os.getpid(), "created_at": now_iso(), "token": uuid.uuid4().hex}
         with os.fdopen(fd, "w", encoding="utf-8") as lock_file:
-            lock_file.write(json.dumps({"pid": os.getpid(), "created_at": now_iso()}) + "\n")
+            lock_file.write(json.dumps(self.payload) + "\n")
         self.acquired = True
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
-        if self.acquired and self.lock_path.exists():
+        if not self.acquired or self.payload is None:
+            return
+        if _read_lock_payload(self.lock_path) != self.payload:
+            return
+        try:
             self.lock_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
-def _lock_process_is_dead(lock_path: Path) -> bool:
+def _read_lock_payload(lock_path: Path) -> dict[str, Any] | None:
     try:
         payload = json.loads(lock_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _lock_process_is_dead(lock_path: Path) -> bool:
+    payload = _read_lock_payload(lock_path)
+    if payload is None:
         return False
     pid = payload.get("pid") if isinstance(payload, dict) else None
     if not isinstance(pid, int) or pid <= 0:
@@ -151,54 +189,13 @@ def run_goal(config: GoalConfig, options: RuntimeOptions | None = None, adapters
     if issues:
         return RunResult(2, "invalid_config", None, "\n".join(issues))
 
-    started = time.monotonic()
-    last_result: RunResult | None = None
-    cycles = 0
-    max_cycles = max(1, options.max_cycles)
     max_seconds = max(0.0, options.max_minutes) * 60.0
-    deadline = started + max_seconds if max_seconds else None
-
-    while cycles < max_cycles and (max_seconds == 0.0 or time.monotonic() - started < max_seconds):
-        last_result = run_cycle(config, options, deadline=deadline, adapters=adapters)
-        cycles += 1
-        if options.dry_run or options.review_only:
-            break
-        if last_result.exit_code != 0 or last_result.status != "active":
-            break
-        state = load_state(config)
-        if state.get("status") in TERMINAL_STATUSES:
-            break
-
-    if last_result is None:
-        state = load_state(config)
-        state["status"] = "budget_limited"
-        state["next_action"] = "tik"
-        append_history(config, state, {"event": "run_budget_exhausted"})
-        save_state(config, state)
-        update_heartbeat(config, state, "run_budget_exhausted", None)
-        return RunResult(1, "budget_limited", None, "run budget exhausted before starting a cycle")
-
-    state = load_state(config)
-    if last_result.status == "active" and cycles >= max_cycles:
-        state["status"] = "budget_limited"
-        state["next_action"] = state.get("next_action") or "tik"
-        append_history(config, state, {"event": "run_cycle_budget_exhausted", "max_cycles": max_cycles})
-        save_state(config, state)
-        update_heartbeat(config, state, "run_cycle_budget_exhausted", last_result.run_dir)
-        return RunResult(1, "budget_limited", last_result.run_dir, f"run cycle budget exhausted after {cycles} cycles")
-    if last_result.status == "active" and max_seconds and time.monotonic() - started >= max_seconds:
-        state["status"] = "budget_limited"
-        state["next_action"] = state.get("next_action") or "tik"
-        append_history(config, state, {"event": "run_time_budget_exhausted", "max_minutes": options.max_minutes})
-        save_state(config, state)
-        update_heartbeat(config, state, "run_time_budget_exhausted", last_result.run_dir)
-        return RunResult(1, "budget_limited", last_result.run_dir, f"run time budget exhausted after {options.max_minutes:g} minutes")
-    update_heartbeat(config, state, "run_finished", last_result.run_dir)
-    return last_result
+    deadline = time.monotonic() + max_seconds if max_seconds else None
+    return run_heartbeat(config, options, deadline=deadline, adapters=adapters)
 
 
 @dataclass
-class ArtifactCycleRunner:
+class HeartbeatRunner:
     config: GoalConfig
     options: RuntimeOptions
     adapters: GoalProviderAdapters
@@ -211,23 +208,23 @@ class ArtifactCycleRunner:
         with HeartbeatLock(self.config.lock_path, self.config.safety.lock_stale_seconds):
             self.state = load_state(self.config)
             git_gate = self._git_gate()
-            defer_cycle_heartbeat = git_gate.enabled and not self.options.dry_run
-            if not defer_cycle_heartbeat:
-                self._heartbeat("cycle_start", None)
+            defer_heartbeat_start = git_gate.enabled and not self.options.dry_run
+            if not defer_heartbeat_start:
+                self._heartbeat("heartbeat_start", None)
             if self.state.get("status") in TERMINAL_STATUSES:
                 save_state(self.config, self.state)
                 self._heartbeat("terminal_state", None)
                 return RunResult(0, str(self.state.get("status")), None, f"goal status is {self.state.get('status')}")
 
-            self._start_cycle(emit_heartbeat=not defer_cycle_heartbeat)
+            self._start_heartbeat(emit_heartbeat=not defer_heartbeat_start)
             if self.options.dry_run:
                 return self._dry_run()
 
             prepare_result = self._prepare_no_mistakes()
             if prepare_result is not None:
                 return prepare_result
-            if defer_cycle_heartbeat:
-                self._heartbeat("cycle_ready", self._run_dir())
+            if defer_heartbeat_start:
+                self._heartbeat("heartbeat_ready", self._run_dir())
 
             producer_result = self._run_producer()
             if producer_result:
@@ -246,6 +243,8 @@ class ArtifactCycleRunner:
             ready = tik_is_ready(self.config, verdict)
             self.state["last_tik"] = tik_state(self.config, self._run_dir(), memo_path, verdict_path, tik_path, artifact, ready)
             if ready:
+                if self.options.review_only:
+                    return self._review_only_passed(artifact)
                 self.state.pop("blocked_reason", None)
                 return self._finish(
                     0,
@@ -265,13 +264,13 @@ class ArtifactCycleRunner:
 
             return self._run_tok(artifact, tik_path)
 
-    def _start_cycle(self, emit_heartbeat: bool = True) -> None:
-        run_dir = cycle_run_dir(self.config, self.state)
+    def _start_heartbeat(self, emit_heartbeat: bool = True) -> None:
+        run_dir = heartbeat_run_dir(self.config, self.state)
         run_dir.mkdir(parents=True, exist_ok=True)
         self.run_dir = run_dir
-        self._cycle().start(run_dir)
+        self._recorder().start(run_dir)
         if emit_heartbeat:
-            self._heartbeat("cycle_ready", run_dir)
+            self._heartbeat("heartbeat_ready", run_dir)
 
     def _prepare_no_mistakes(self) -> RunResult | None:
         git_gate = self._git_gate()
@@ -288,13 +287,16 @@ class ArtifactCycleRunner:
             result = git_gate.prepare(
                 self._run_dir(),
                 int(self.state.get("iteration", 0)),
-                "cycle_start",
+                "heartbeat_start",
+                deadline=self.deadline,
             )
             record_no_mistakes_result(span, result)
         self._record_no_mistakes("no_mistakes_prepare", result)
         save_state(self.config, self.state)
         if result.ok:
             return None
+        if result.status == NO_MISTAKES_BUDGET_EXHAUSTED:
+            return self._record_no_mistakes_budget_exhausted("no_mistakes_prepare_budget_exhausted", result)
         self.state["status"] = "blocked_no_mistakes_failed"
         self.state["next_action"] = None
         self.state["blocked_reason"] = result.detail
@@ -455,6 +457,17 @@ class ArtifactCycleRunner:
             artifact=artifact,
         )
 
+    def _review_only_passed(self, artifact: dict[str, Any]) -> RunResult:
+        return self._finish(
+            0,
+            "active",
+            "artifact passed tik; goal completion skipped by tik command",
+            phase="review_only_complete",
+            event="review_only_tik_passed",
+            next_action=None,
+            artifact=artifact,
+        )
+
     def _run_tok(self, artifact: dict[str, Any], tik_path: Path) -> RunResult:
         run_dir = self._run_dir()
         tok_prompt = render_tok_prompt(self.config, artifact, tik_path, run_dir)
@@ -519,7 +532,7 @@ class ArtifactCycleRunner:
             return self._finish(
                 0,
                 "active",
-                "tok completed; next cycle must rebuild and run tik",
+                "tok completed; next heartbeat must rebuild and run tik",
                 phase="tok_completed",
                 event="tok_completed",
                 next_action="tik",
@@ -538,7 +551,10 @@ class ArtifactCycleRunner:
         artifact: dict[str, Any] | None = None,
         blocked_reason: str | None = None,
     ) -> RunResult:
-        self._cycle().finish_state(
+        gate_result = self._gate_no_mistakes(exit_code, status)
+        if gate_result is not None:
+            return gate_result
+        self._recorder().finish_state(
             status,
             event=event,
             next_action=next_action,
@@ -546,9 +562,6 @@ class ArtifactCycleRunner:
             artifact=artifact,
             blocked_reason=blocked_reason,
         )
-        gate_result = self._gate_no_mistakes(exit_code, status)
-        if gate_result is not None:
-            return gate_result
         self._heartbeat(phase, self._run_dir())
         return RunResult(exit_code, status, self._run_dir(), message)
 
@@ -593,6 +606,9 @@ class ArtifactCycleRunner:
             save_state(self.config, self.state)
             return None
 
+        if result.status == NO_MISTAKES_BUDGET_EXHAUSTED:
+            return self._record_no_mistakes_budget_exhausted("no_mistakes_gate_budget_exhausted", result)
+
         self.state["status"] = "blocked_no_mistakes_failed"
         self.state["next_action"] = None
         self.state["blocked_reason"] = result.detail
@@ -613,28 +629,49 @@ class ArtifactCycleRunner:
         self._heartbeat("no_mistakes_failed", self._run_dir())
         return RunResult(1, "blocked_no_mistakes_failed", self._run_dir(), result.detail)
 
+    def _record_no_mistakes_budget_exhausted(self, event: str, result: NoMistakesResult) -> RunResult:
+        self.state["status"] = "budget_limited"
+        self.state["next_action"] = "tik"
+        self.state.pop("blocked_reason", None)
+        append_history(
+            self.config,
+            self.state,
+            {
+                "event": event,
+                "status": result.status,
+                "detail": result.detail,
+                "branch": result.branch,
+                "commit": result.commit,
+                "log_path": rel(self.config, result.log_path) if result.log_path else None,
+                "run_dir": rel(self.config, self._run_dir()),
+            },
+        )
+        save_state(self.config, self.state)
+        self._heartbeat("run_budget_exhausted", self._run_dir())
+        return RunResult(1, "budget_limited", self._run_dir(), result.detail)
+
     def _record_no_mistakes(self, event: str, result: NoMistakesResult) -> None:
-        self._cycle().record_no_mistakes(event, result)
+        self._recorder().record_no_mistakes(event, result)
 
     def _event(self, event: str, artifact: dict[str, Any] | None = None) -> None:
-        self._cycle().append_event(event, self._run_dir(), artifact)
+        self._recorder().append_event(event, self._run_dir(), artifact)
 
     def _heartbeat(self, phase: str, run_dir: Path | None) -> None:
-        self._cycle().heartbeat(phase, run_dir)
+        self._recorder().heartbeat(phase, run_dir)
 
     def _run_dir(self) -> Path:
         if self.run_dir is None:
-            raise RuntimeError("cycle run directory has not been initialized")
+            raise RuntimeError("heartbeat run directory has not been initialized")
         return self.run_dir
 
-    def _cycle(self) -> ArtifactCycleRecorder:
-        return ArtifactCycleRecorder(self.config, self.state, self.telemetry)
+    def _recorder(self) -> HeartbeatRecorder:
+        return HeartbeatRecorder(self.config, self.state, self.telemetry)
 
     def _git_gate(self) -> NoMistakesGate:
         return NoMistakesGate(self.config)
 
 
-def run_cycle(
+def run_heartbeat(
     config: GoalConfig,
     options: RuntimeOptions | None = None,
     deadline: float | None = None,
@@ -648,20 +685,23 @@ def run_cycle(
         deadline = time.monotonic() + options.max_minutes * 60.0
     telemetry = configure_observability(config)
     with telemetry.span(
-        "goal_cli.cycle",
+        "goal_cli.heartbeat.run",
         {
             "goal.name": config.name,
             "goal.root": str(config.root),
             "goal.config": str(config.path),
-            "goal.command": "cycle",
+            "goal.command": "heartbeat",
             "goal.dry_run": options.dry_run,
             "goal.review_only": options.review_only,
             "goal.deadline_set": deadline is not None,
             "goal.no_mistakes.enabled": NoMistakesGate(config).enabled,
         },
     ) as span:
-        runner = ArtifactCycleRunner(config, options, adapters or ProductionGoalProviderAdapters(), deadline, telemetry)
-        result = runner.run()
+        runner = HeartbeatRunner(config, options, adapters or ProductionGoalProviderAdapters(), deadline, telemetry)
+        try:
+            result = runner.run()
+        except HeartbeatLockError as exc:
+            result = RunResult(1, "locked", None, str(exc))
         record_run_result(span, result)
     telemetry.flush()
     return result
@@ -678,7 +718,7 @@ def render_prompts_to_run_dir(config: GoalConfig, run_dir: Path, tik_path: Path 
         tik_path = run_dir / "tik.md"
         tik_path.write_text(
             "# Tik Ledger\n\n"
-            "Dry run placeholder. A real cycle writes this file after tik reviews the canonical artifact.\n",
+            "Dry run placeholder. A real heartbeat writes this file after tik reviews the canonical artifact.\n",
             encoding="utf-8",
         )
     (run_dir / "tok_prompt.md").write_text(render_tok_prompt(config, artifact, tik_path, run_dir), encoding="utf-8")
@@ -869,7 +909,7 @@ def update_blocker_state(config: GoalConfig, state: dict[str, Any], verdict: dic
     if repeats >= config.safety.max_blocker_repeats:
         state["status"] = "blocked_repeated_same_objection"
         state["next_action"] = None
-        state["blocked_reason"] = "same tik objection repeated across cycles"
+        state["blocked_reason"] = "same tik objection repeated across heartbeats"
     else:
         state["status"] = "active"
         state["next_action"] = "tok"
@@ -928,9 +968,9 @@ def tok_state(config: GoalConfig, run_dir: Path, report_path: Path, artifact: di
     }
 
 
-def cycle_run_dir(config: GoalConfig, state: dict[str, Any]) -> Path:
+def heartbeat_run_dir(config: GoalConfig, state: dict[str, Any]) -> Path:
     iteration = int(state.get("iteration", 0)) + 1
-    return config.runs_dir / f"cycle-{iteration:04d}-{timestamp()}"
+    return config.runs_dir / f"heartbeat-{iteration:04d}-{timestamp()}"
 
 
 def now_iso() -> str:

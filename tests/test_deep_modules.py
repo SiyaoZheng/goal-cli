@@ -15,13 +15,13 @@ from goal_cli.tok_execution import TokExecutionResult
 
 
 class DeepModuleInterfaceTests(unittest.TestCase):
-    def test_runtime_cycle_can_complete_through_provider_adapter_seam(self) -> None:
+    def test_runtime_heartbeat_can_complete_through_provider_adapter_seam(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             config = load_config(self._write_project(root))
             adapters = PassingProviderAdapters()
 
-            result = run_goal(config, RuntimeOptions(max_cycles=1, max_minutes=0), adapters=adapters)
+            result = run_goal(config, RuntimeOptions(max_minutes=0), adapters=adapters)
 
             self.assertEqual(result.status, "complete")
             self.assertEqual(result.exit_code, 0)

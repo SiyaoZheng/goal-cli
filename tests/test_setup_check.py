@@ -81,6 +81,44 @@ class SetupCheckTests(unittest.TestCase):
             self.assertEqual(self._detail(checks, "one_click_artifact_loop"), "ready for one-click goal-cli run")
             self.assertEqual(project_source.read_text(encoding="utf-8"), before)
 
+    def test_doctor_resolves_relative_no_mistakes_binary_from_project_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_project(root)
+            self._install_fake_codex(root)
+            tools_dir = root / "tools"
+            tools_dir.mkdir()
+            fake_no_mistakes = tools_dir / "no-mistakes"
+            fake_no_mistakes.write_text(
+                textwrap.dedent(
+                    """
+                    #!/usr/bin/env python3
+                    import sys
+
+                    if sys.argv[1:] == ["axi", "run", "--help"]:
+                        print("--intent --yes --skip")
+                        raise SystemExit(0)
+                    raise SystemExit(2)
+                    """
+                ).strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            fake_no_mistakes.chmod(0o755)
+            config_path = root / "goal.toml"
+            config_path.write_text(
+                config_path.read_text(encoding="utf-8").replace(
+                    "[no_mistakes]\nenabled = false",
+                    '[no_mistakes]\nenabled = true\nbinary = "tools/no-mistakes"',
+                ),
+                encoding="utf-8",
+            )
+
+            checks = run_doctor(load_config(config_path))
+
+            self.assertEqual(doctor_exit_code(checks), 0, checks)
+            self.assertIn("tools/no-mistakes", self._detail(checks, "no_mistakes.binary"))
+
     def _write_project(
         self,
         root: Path,

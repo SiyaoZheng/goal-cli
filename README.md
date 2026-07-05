@@ -3,17 +3,16 @@
 `goal-cli` is an artifact-centered runtime for autonomous project loops.
 
 The goal is always a concrete product: a PDF, report, benchmark result, site,
-package, dataset, model checkpoint, or another canonical artifact. A cycle does
-one bounded pass:
+package, dataset, model checkpoint, or another canonical artifact. A heartbeat
+does one bounded pass:
 
 1. run the producer command,
 2. verify the canonical artifact exists,
 3. run `tik`, which writes the artifact critique into `tik.md`,
-4. run one bounded `tok` source-repair pass only if `tik` fails the artifact,
-5. continue until completion, blocking, or run budget exhaustion.
+4. run one bounded `tok` source-repair pass only if `tik` fails the artifact.
 
-`tok` never completes the goal directly. Only a later `tik` over a reproduced
-artifact can mark the goal complete.
+`tok` never completes the goal directly. A later heartbeat may rebuild the
+artifact and let `tik` mark the goal complete.
 
 ## Quick Start
 
@@ -38,7 +37,7 @@ The implementation keeps four internal seams narrow:
 
 - Git Gate: `NoMistakesGate` owns clean checkpoints, feature branches,
   lightspeed/full skip presets, readiness flags, and `no-mistakes axi run`.
-- Artifact Cycle: `ArtifactCycleRecorder` owns cycle state, history,
+- Heartbeat State: `HeartbeatRecorder` owns heartbeat state, history,
   heartbeat emission, terminal transitions, and no-mistakes state recording.
 - Tok Execution: `tok_execution` owns the Codex `/goal` prompt, JSON Schema,
   command construction, report validation, and diagnostic files.
@@ -58,10 +57,10 @@ binary = "no-mistakes"
 mode = "lightspeed"
 ```
 
-When enabled, each non-dry-run cycle starts from a clean Git worktree. If the
+When enabled, each non-dry-run heartbeat starts from a clean Git worktree. If the
 repo is on the default branch, goal-cli creates a `goal-cli/...` feature branch.
 If the worktree is dirty, goal-cli commits a checkpoint, then successful `tok`
-or completion cycles run `no-mistakes axi run --intent ... --yes`.
+or completion heartbeats run `no-mistakes axi run --intent ... --yes`.
 Runtime state under `.goal/` is kept out of commits through `.git/info/exclude`.
 
 The default `mode = "lightspeed"` uses no-mistakes' native `--skip` support to
@@ -77,7 +76,7 @@ missing binary, or a failed gate stops the run with
 ## Observability
 
 OpenTelemetry tracing is enabled by default. `goal-cli` emits standard OTLP
-HTTP spans for the cycle, heartbeat, producer, artifact load, `tik`, `tok`,
+HTTP spans for the heartbeat, producer, artifact load, `tik`, `tok`,
 and no-mistakes gate. It does not implement a collector, storage
 layer, or dashboard. If the configured OTLP receiver is not reachable and no
 OTLP endpoint was explicitly set through the environment, `goal-cli` falls back
@@ -107,7 +106,7 @@ docker run --rm --name goal-cli-otel \
   --config=/etc/otelcol-contrib/config.yaml
 ```
 
-Then run `goal-cli cycle` or `goal-cli run` and inspect either the collector
+Then run `goal-cli run` and inspect either the collector
 output in `.goal/observability/` or the fallback `.goal/observability/traces.jsonl`.
 Standard OpenTelemetry environment variables such as
 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_ENDPOINT`,
@@ -117,8 +116,7 @@ Standard OpenTelemetry environment variables such as
 
 - `goal-cli init` creates a starter `goal.toml`.
 - `goal-cli validate` checks config, artifact paths, and writable scopes.
-- `goal-cli run` runs cycles until the goal completes, blocks, or exhausts the run budget.
-- `goal-cli cycle` runs exactly one producer/tik/tok cycle.
+- `goal-cli run` runs one autonomous heartbeat.
 - `goal-cli tik` runs producer plus tik without a tok pass.
 - `goal-cli render-prompts` writes rendered tik and tok prompts.
 - `goal-cli state` prints `.goal/state.json` or the default initial state.
@@ -179,4 +177,4 @@ Tok reports are machine-checked JSON. A successful source revision reports:
 }
 ```
 
-Only the next reproduced artifact and tik pass can complete the goal.
+Only a later heartbeat that reruns the producer and passes tik can complete the goal.

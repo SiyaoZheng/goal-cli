@@ -13,7 +13,7 @@ runs_dir = ".goal/runs"
 
 - `name`: stable goal name written to state and heartbeat files.
 - `state_dir`: directory for `state.json`, `heartbeat.json`, and the lock.
-- `runs_dir`: per-cycle logs, prompts, verdicts, schemas, and reports.
+- `runs_dir`: per-heartbeat logs, prompts, verdicts, schemas, and reports.
 
 ## Artifact
 
@@ -33,7 +33,7 @@ copy_as = "full_paper.pdf"
 command = "make all"
 ```
 
-The producer must reproduce the canonical artifact from source. Completion is
+The producer must rebuild the canonical artifact from source. Completion is
 never accepted from source edits alone.
 
 ## Tik
@@ -128,7 +128,7 @@ If no bounded source change is possible, tok reports
 
 ## no-mistakes Gate
 
-`goal-cli` can use `kunchenguid/no-mistakes` as the Git gate for cycle
+`goal-cli` can use `kunchenguid/no-mistakes` as the Git gate for heartbeat
 checkpoints.
 
 ```toml
@@ -138,7 +138,7 @@ mode = "lightspeed"
 branch_prefix = "goal-cli"
 skip_steps = []
 timeout_seconds = 0
-checkpoint_message = "goal-cli checkpoint: {goal_name} cycle {iteration} {phase}"
+checkpoint_message = "goal-cli checkpoint: {goal_name} heartbeat {iteration} {phase}"
 ```
 
 - `enabled`: defaults to `true`. Set it to `false` only for isolated tests or
@@ -156,9 +156,9 @@ checkpoint_message = "goal-cli checkpoint: {goal_name} cycle {iteration} {phase}
 - `checkpoint_message`: Git commit message template. Available placeholders are
   `{goal_name}`, `{iteration}`, and `{phase}`.
 
-When enabled, goal-cli prepares the repo before a non-dry-run cycle by ignoring
+When enabled, goal-cli prepares the repo before a non-dry-run heartbeat by ignoring
 `.goal/` in `.git/info/exclude`, auto-branching if needed, and checkpointing
-dirty project changes. After successful tok and completion cycles, it
+dirty project changes. After successful tok and completion heartbeats, it
 checkpoints again, runs `no-mistakes init`, and then runs:
 
 ```bash
@@ -201,7 +201,7 @@ are not replaced by the local JSONL fallback.
 
 Emitted spans include:
 
-- `goal_cli.cycle`
+- `goal_cli.heartbeat.run`
 - `goal_cli.heartbeat`
 - `goal_cli.producer`
 - `goal_cli.artifact.load`
@@ -293,8 +293,5 @@ project sources. `one_click_artifact_loop` is only ready after this check passes
 
 ## Runtime Units
 
-- `cycle`: one producer/tik/tok pass.
-- `run`: one CLI invocation that may execute multiple cycles.
-- `heartbeat`: liveness/progress file state only.
-
-Heartbeat is not a work unit.
+- `heartbeat`: one autonomous producer/tik/tok pass.
+- `run`: one CLI invocation that executes exactly one heartbeat.

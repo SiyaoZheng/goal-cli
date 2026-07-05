@@ -90,7 +90,7 @@ tik says it satisfies the goal.
 
 This artifact-centered rule is the local sharpening of the FullMD protocol:
 the state machine does not merely ask whether "work happened"; it asks whether
-the reproduced artifact passes the configured tik.
+the canonical artifact produced from source passes the configured tik.
 
 This means a goal is not:
 
@@ -107,7 +107,7 @@ artifact. Tik writes `tik.md`, a Markdown ledger containing the artifact
 critique. Tok consumes that ledger as a whole; it does not require issue IDs,
 categories, or one-to-one bookkeeping. The tok writes a schema-checked JSON
 report; it never completes the artifact-level goal directly. A tok can only
-change allowed sources so that a later cycle can reproduce the artifact and
+change allowed sources so that a later heartbeat can rebuild the artifact and
 the tik can judge it.
 
 After the producer, the runtime has exactly two sequential roles:
@@ -130,25 +130,22 @@ After the producer, the runtime has exactly two sequential roles:
 7. If the tik fails, launch one bounded Codex `/goal` tok pass against
    validated writable scopes.
 8. Record the schema-checked tok report in files.
-9. Start another cycle when run budget remains; otherwise exit with file state
-   ready for the next run.
+9. Exit with file state ready for the next heartbeat.
 
-In short: `producer -> tik -> tok -> reproduce -> tik`. The
-`reproduce -> tik` part happens at the start of the following cycle, so
-the tok's own report is never accepted as artifact success.
+In short: `producer -> tik -> tok` when tik fails, or `producer -> tik` when tik
+passes. The tok's own report is never accepted as artifact success.
 
-Heartbeat is not the unit of work. A heartbeat is a liveness/progress marker
-written while a run is active. A cycle is the unit of work. A run may contain
-multiple cycles until completion, blocking, stall/pivot policy, cycle budget, or
-wall-clock budget stops that invocation. Budget exhaustion is recoverable: a
-later run can continue from file state.
+Heartbeat is the unit of autonomous work. A run contains exactly one heartbeat,
+then exits. The next run continues from file state and may rebuild the artifact
+and run tik again. Budget exhaustion is recoverable: a later run can continue
+from file state.
 
 ## Current Module Boundaries
 
 - Git Gate: `NoMistakesGate` is the only place that knows how to prepare a clean
   Git checkpoint, move off a default branch, choose no-mistakes skip presets,
   and invoke `no-mistakes axi run`.
-- Artifact Cycle: `ArtifactCycleRecorder` owns state/history/heartbeat writes
+- Heartbeat State: `HeartbeatRecorder` owns state/history/heartbeat writes
   and transition recording. The runner orchestrates producer, tik, and tok; it
   does not hand-edit heartbeat JSON.
 - Tok Execution: `tok_execution` owns the Codex `/goal` command, schema, prompt

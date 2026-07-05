@@ -10,8 +10,9 @@ import unittest
 from pathlib import Path
 
 from goal_cli.adapters import TikOutcome, ProducerOutcome
+from goal_cli import no_mistakes
 from goal_cli.config import ConfigError, load_config
-from goal_cli.runtime import RuntimeOptions, load_state, run_cycle
+from goal_cli.runtime import RuntimeOptions, load_state, run_heartbeat, run_goal
 from goal_cli.tok_execution import TokExecutionResult
 
 
@@ -32,7 +33,7 @@ class NoMistakesIntegrationTests(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 load_config(config_path)
 
-    def test_cycle_auto_checkpoints_and_runs_no_mistakes_on_clean_feature_branch(self) -> None:
+    def test_heartbeat_auto_checkpoints_and_runs_no_mistakes_on_clean_feature_branch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             fake_log = root / ".goal" / "fake-no-mistakes.jsonl"
@@ -40,7 +41,7 @@ class NoMistakesIntegrationTests(unittest.TestCase):
             config = load_config(self._write_project(root, disable_observability=True))
             self._git(root, "init")
 
-            result = run_cycle(config, RuntimeOptions(max_minutes=0), adapters=RevisionAdapters())
+            result = run_heartbeat(config, RuntimeOptions(max_minutes=0), adapters=RevisionAdapters())
 
             self.assertEqual(result.exit_code, 0)
             self.assertEqual(result.status, "active")
@@ -49,6 +50,10 @@ class NoMistakesIntegrationTests(unittest.TestCase):
             self.assertEqual(self._git(root, "status", "--porcelain=v1", "--untracked-files=all").stdout.strip(), "")
             state = load_state(config)
             self.assertEqual(state["last_no_mistakes"]["status"], "no_mistakes_passed")
+            exclude_text = (root / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+            self.assertIn("/.goal/", exclude_text)
+            self.assertIn("/output/", exclude_text)
+            self.assertIn("/build/", exclude_text)
 
             events = [json.loads(line) for line in fake_log.read_text(encoding="utf-8").splitlines()]
             self.assertEqual([event["command"] for event in events], ["init", "axi run"])
@@ -76,7 +81,7 @@ class NoMistakesIntegrationTests(unittest.TestCase):
             )
             self._git(root, "init")
 
-            result = run_cycle(config, RuntimeOptions(max_minutes=0), adapters=RevisionAdapters())
+            result = run_heartbeat(config, RuntimeOptions(max_minutes=0), adapters=RevisionAdapters())
 
             self.assertEqual(result.exit_code, 0)
             events = [json.loads(line) for line in fake_log.read_text(encoding="utf-8").splitlines()]
@@ -97,15 +102,73 @@ class NoMistakesIntegrationTests(unittest.TestCase):
             self._git(root, "init")
 
             started = time.monotonic()
-            result = run_cycle(config, RuntimeOptions(max_minutes=0.005), adapters=RevisionAdapters())
+            result = run_heartbeat(config, RuntimeOptions(max_minutes=0.005), adapters=RevisionAdapters())
             elapsed = time.monotonic() - started
 
             self.assertEqual(result.exit_code, 1)
-            self.assertEqual(result.status, "blocked_no_mistakes_failed")
+            self.assertEqual(result.status, "budget_limited")
             self.assertLess(elapsed, 2.0)
             self.assertRegex(result.message, r"timed out|run budget exhausted")
+            state = load_state(config)
+            self.assertEqual(state["status"], "budget_limited")
+            self.assertEqual(state["last_no_mistakes"]["status"], "no_mistakes_budget_exhausted")
             time.sleep(1.0)
             self.assertFalse(child_marker.exists())
+
+    def test_no_mistakes_prepare_budget_exhaustion_is_resumable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            fake_log = root / ".goal" / "fake-no-mistakes.jsonl"
+            self._install_fake_no_mistakes(root, fake_log)
+            config = load_config(self._write_project(root, disable_observability=True))
+            self._git(root, "init")
+
+            result = run_heartbeat(config, RuntimeOptions(max_minutes=0), deadline=time.monotonic() - 1, adapters=RevisionAdapters())
+
+            self.assertEqual(result.exit_code, 1)
+            self.assertEqual(result.status, "budget_limited")
+            self.assertIn("run budget exhausted", result.message)
+            state = load_state(config)
+            self.assertEqual(state["status"], "budget_limited")
+            self.assertEqual(state["last_no_mistakes"]["status"], "no_mistakes_budget_exhausted")
+
+    def test_run_goal_preserves_no_mistakes_budget_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            fake_log = root / ".goal" / "fake-no-mistakes.jsonl"
+            self._install_fake_no_mistakes(root, fake_log, axi_sleep_seconds=5.0)
+            config = load_config(self._write_project(root, disable_observability=True))
+            self._git(root, "init")
+
+            result = run_goal(config, RuntimeOptions(max_minutes=0.005), adapters=RevisionAdapters())
+
+            self.assertEqual(result.status, "budget_limited")
+            heartbeat = json.loads(config.heartbeat_path.read_text(encoding="utf-8"))
+            self.assertEqual(heartbeat["phase"], "run_budget_exhausted")
+
+    def test_no_mistakes_prepare_records_granular_non_git_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            fake_log = root / ".goal" / "fake-no-mistakes.jsonl"
+            self._install_fake_no_mistakes(root, fake_log)
+            config = load_config(self._write_project(root, disable_observability=True))
+
+            result = run_heartbeat(config, RuntimeOptions(max_minutes=0), adapters=RevisionAdapters())
+
+            self.assertEqual(result.exit_code, 1)
+            self.assertEqual(result.status, "blocked_no_mistakes_failed")
+            self.assertEqual(load_state(config)["last_no_mistakes"]["status"], "no_mistakes_no_git_repository")
+
+    def test_git_diff_cached_timeout_is_classified_as_budget_exhaustion(self) -> None:
+        result = subprocess.CompletedProcess(
+            ["git", "diff", "--cached"],
+            124,
+            "",
+            "time budget exhausted before git command start",
+        )
+
+        with self.assertRaises(no_mistakes._NoMistakesBudgetExhausted):
+            no_mistakes._raise_if_git_timed_out(result, time.monotonic() - 1, "git diff --cached before no-mistakes")
 
     def _write_project(self, root: Path, disable_observability: bool = False, no_mistakes_table: str = "") -> Path:
         (root / "src").mkdir()

@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 
 from goal_cli.config import ConfigError, load_config, validate_config
-from goal_cli.runtime import HeartbeatLock, RuntimeOptions, load_state, run_cycle, run_goal
+from goal_cli.runtime import HeartbeatLock, RuntimeOptions, load_state, run_heartbeat, run_goal
 from goal_cli.tok_execution import execute_tok
 
 
@@ -26,42 +26,111 @@ class GoalRuntimeTests(unittest.TestCase):
 
             self.assertFalse(lock_path.exists())
 
-    def test_run_rebuilds_artifact_until_tik_passes(self) -> None:
+    def test_heartbeat_lock_exit_only_releases_owned_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            lock_path = Path(temp_dir) / ".goal" / ".heartbeat.lock"
+            lock = HeartbeatLock(lock_path, stale_seconds=6 * 60 * 60)
+            lock.__enter__()
+            successor_payload = {"pid": os.getpid(), "created_at": "2026-07-04T00:00:00+00:00", "token": "successor"}
+            lock_path.write_text(json.dumps(successor_payload) + "\n", encoding="utf-8")
+
+            lock.__exit__(None, None, None)
+
+            self.assertEqual(json.loads(lock_path.read_text(encoding="utf-8")), successor_payload)
+
+    def test_run_goal_reports_active_lock_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_basic_project(root)
+            config = load_config(root / "goal.toml")
+            config.state_dir.mkdir(parents=True)
+            config.lock_path.write_text(json.dumps({"pid": os.getpid(), "created_at": "2026-07-04T00:00:00+00:00"}) + "\n", encoding="utf-8")
+            heartbeat_text = json.dumps({"phase": "tok_running", "run_dir": ".goal/runs/heartbeat-0001"}) + "\n"
+            config.heartbeat_path.write_text(heartbeat_text, encoding="utf-8")
+
+            result = run_goal(config, RuntimeOptions(max_minutes=0))
+
+            self.assertEqual(result.exit_code, 1)
+            self.assertEqual(result.status, "locked")
+            self.assertIn("heartbeat already running", result.message)
+            self.assertEqual(config.heartbeat_path.read_text(encoding="utf-8"), heartbeat_text)
+
+    def test_run_goal_advances_one_heartbeat_at_a_time(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             self._write_basic_project(root)
 
             config = load_config(root / "goal.toml")
-            result = run_goal(config, RuntimeOptions(max_cycles=3, max_minutes=0))
+            first_result = run_goal(config, RuntimeOptions(max_minutes=0))
 
-            self.assertEqual(result.exit_code, 0)
-            self.assertEqual(result.status, "complete")
+            self.assertEqual(first_result.exit_code, 0)
+            self.assertEqual(first_result.status, "active")
+            state = load_state(config)
+            self.assertEqual(state["status"], "active")
+            self.assertEqual(state["iteration"], 1)
+            self.assertEqual(state["next_action"], "tik")
+            self.assertEqual((root / "output" / "artifact.txt").read_text(encoding="utf-8"), "draft\n")
+            heartbeat = json.loads((root / ".goal" / "heartbeat.json").read_text(encoding="utf-8"))
+            self.assertEqual(heartbeat["phase"], "tok_completed")
+
+            second_result = run_goal(config, RuntimeOptions(max_minutes=0))
+
+            self.assertEqual(second_result.exit_code, 0)
+            self.assertEqual(second_result.status, "complete")
             state = load_state(config)
             self.assertEqual(state["status"], "complete")
             self.assertEqual(state["iteration"], 2)
             self.assertEqual((root / "output" / "artifact.txt").read_text(encoding="utf-8"), "ready\n")
-            self.assertTrue((root / ".goal" / "heartbeat.json").exists())
 
-    def test_cycle_budget_exhaustion_is_not_reported_as_success_and_can_resume(self) -> None:
+    def test_active_heartbeat_is_success_and_can_resume(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             self._write_basic_project(root)
 
             config = load_config(root / "goal.toml")
-            first_result = run_goal(config, RuntimeOptions(max_cycles=1, max_minutes=0))
+            first_result = run_goal(config, RuntimeOptions(max_minutes=0))
 
-            self.assertEqual(first_result.exit_code, 1)
-            self.assertEqual(first_result.status, "budget_limited")
+            self.assertEqual(first_result.exit_code, 0)
+            self.assertEqual(first_result.status, "active")
             state = load_state(config)
-            self.assertEqual(state["status"], "budget_limited")
+            self.assertEqual(state["status"], "active")
             self.assertEqual(state["next_action"], "tik")
             self.assertEqual((root / "output" / "artifact.txt").read_text(encoding="utf-8"), "draft\n")
 
-            second_result = run_goal(config, RuntimeOptions(max_cycles=2, max_minutes=0))
+            second_result = run_goal(config, RuntimeOptions(max_minutes=0))
 
             self.assertEqual(second_result.exit_code, 0)
             self.assertEqual(second_result.status, "complete")
             self.assertEqual(load_state(config)["status"], "complete")
+
+    def test_successful_tok_clears_stale_blocked_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_basic_project(root)
+            config = load_config(root / "goal.toml")
+            config.state_dir.mkdir(parents=True)
+            config.state_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "goal": config.name,
+                        "status": "active",
+                        "iteration": 0,
+                        "created_at": "2026-07-04T00:00:00+00:00",
+                        "updated_at": "2026-07-04T00:00:00+00:00",
+                        "next_action": "tik",
+                        "blocked_reason": "stale blocker",
+                        "history": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = run_heartbeat(config, RuntimeOptions(max_minutes=0))
+
+            self.assertEqual(result.status, "active")
+            self.assertNotIn("blocked_reason", load_state(config))
 
     def test_writable_scope_rejects_project_root_and_generated_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -81,7 +150,7 @@ class GoalRuntimeTests(unittest.TestCase):
             (root / "scripts" / "tik.py").write_text("print('not json')\n", encoding="utf-8")
 
             config = load_config(root / "goal.toml")
-            result = run_goal(config, RuntimeOptions(max_cycles=2, max_minutes=0))
+            result = run_goal(config, RuntimeOptions(max_minutes=0))
 
             self.assertEqual(result.exit_code, 1)
             self.assertEqual(result.status, "blocked_unparseable_tik")
@@ -94,7 +163,7 @@ class GoalRuntimeTests(unittest.TestCase):
             config = load_config(root / "goal.toml")
 
             for _ in range(3):
-                result = run_cycle(config, RuntimeOptions(review_only=True, max_minutes=0))
+                result = run_heartbeat(config, RuntimeOptions(review_only=True, max_minutes=0))
 
             state = load_state(config)
             self.assertEqual(result.exit_code, 0)
@@ -104,18 +173,40 @@ class GoalRuntimeTests(unittest.TestCase):
             self.assertNotIn("consecutive_blocker_count", state)
             self.assertNotIn("blocker_fingerprint", state)
 
-    def test_invalid_tok_report_blocks_before_next_cycle(self) -> None:
+    def test_review_only_tik_pass_does_not_complete_goal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_basic_project(root)
+            (root / "src" / "source.txt").write_text("ready\n", encoding="utf-8")
+            config = load_config(root / "goal.toml")
+
+            result = run_heartbeat(config, RuntimeOptions(review_only=True, max_minutes=0))
+
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.status, "active")
+            state = load_state(config)
+            self.assertEqual(state["status"], "active")
+            self.assertEqual(state["history"][-1]["event"], "review_only_tik_passed")
+
+    def test_invalid_tok_report_blocks_before_next_heartbeat(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             self._write_basic_project(root)
             self._write_tok_behavior(root, {"mode": "invalid"})
 
             config = load_config(root / "goal.toml")
-            result = run_goal(config, RuntimeOptions(max_cycles=2, max_minutes=0))
+            result = run_goal(config, RuntimeOptions(max_minutes=0))
 
             self.assertEqual(result.exit_code, 1)
             self.assertEqual(result.status, "blocked_tok_failed")
             self.assertEqual(load_state(config)["status"], "blocked_tok_failed")
+
+            self._write_tok_behavior(root, {"mode": "success"})
+            retry_result = run_goal(config, RuntimeOptions(max_minutes=0))
+
+            self.assertEqual(retry_result.exit_code, 0)
+            self.assertEqual(retry_result.status, "active")
+            self.assertEqual(load_state(config)["status"], "active")
 
     def test_tok_can_report_no_source_change_possible(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -130,7 +221,7 @@ class GoalRuntimeTests(unittest.TestCase):
             )
 
             config = load_config(root / "goal.toml")
-            result = run_goal(config, RuntimeOptions(max_cycles=2, max_minutes=0))
+            result = run_goal(config, RuntimeOptions(max_minutes=0))
 
             self.assertEqual(result.exit_code, 1)
             self.assertEqual(result.status, "blocked_no_source_change_possible")
@@ -143,7 +234,7 @@ class GoalRuntimeTests(unittest.TestCase):
             root = Path(temp_dir)
             bin_dir = root / "bin"
             src_dir = root / "src"
-            run_dir = root / ".goal" / "runs" / "cycle-0001"
+            run_dir = root / ".goal" / "runs" / "heartbeat-0001"
             bin_dir.mkdir()
             src_dir.mkdir()
             run_dir.mkdir(parents=True)
@@ -195,7 +286,7 @@ class GoalRuntimeTests(unittest.TestCase):
             self._write_basic_project(root)
             config = load_config(root / "goal.toml")
 
-            result = run_cycle(config, RuntimeOptions(max_minutes=0))
+            result = run_heartbeat(config, RuntimeOptions(max_minutes=0))
 
             self.assertEqual(result.exit_code, 0)
             self.assertEqual(result.status, "active")
@@ -225,7 +316,7 @@ class GoalRuntimeTests(unittest.TestCase):
             os.environ["PATH"] = str(no_codex_bin)
             try:
                 config = load_config(config_path)
-                result = run_goal(config, RuntimeOptions(max_cycles=1, max_minutes=0))
+                result = run_goal(config, RuntimeOptions(max_minutes=0))
             finally:
                 os.environ["PATH"] = old_path
 
@@ -251,7 +342,7 @@ class GoalRuntimeTests(unittest.TestCase):
 
             config = load_config(config_path)
             started = time.monotonic()
-            result = run_goal(config, RuntimeOptions(max_cycles=1, max_minutes=0.001))
+            result = run_goal(config, RuntimeOptions(max_minutes=0.001))
             elapsed = time.monotonic() - started
 
             self.assertEqual(result.exit_code, 1)

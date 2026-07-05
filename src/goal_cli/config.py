@@ -12,14 +12,9 @@ from .template import template_placeholders
 
 TERMINAL_STATUSES = {
     "complete",
-    "blocked_producer_failed",
-    "blocked_artifact_missing",
-    "blocked_tik_failed",
     "blocked_unparseable_tik",
     "blocked_repeated_same_objection",
     "blocked_no_source_change_possible",
-    "blocked_tok_failed",
-    "blocked_no_mistakes_failed",
 }
 
 NO_MISTAKES_SKIP_STEPS = {
@@ -148,7 +143,7 @@ class NoMistakesConfig:
     intent: str | None = None
     skip_steps: tuple[str, ...] = ()
     timeout_seconds: float = 0.0
-    checkpoint_message: str = "goal-cli checkpoint: {goal_name} cycle {iteration} {phase}"
+    checkpoint_message: str = "goal-cli checkpoint: {goal_name} heartbeat {iteration} {phase}"
 
 
 @dataclass(frozen=True)
@@ -324,7 +319,7 @@ def load_config(config_path: str | Path = "goal.toml") -> GoalConfig:
         checkpoint_message=str(
             no_mistakes_raw.get(
                 "checkpoint_message",
-                "goal-cli checkpoint: {goal_name} cycle {iteration} {phase}",
+                "goal-cli checkpoint: {goal_name} heartbeat {iteration} {phase}",
             )
         ).strip(),
     )

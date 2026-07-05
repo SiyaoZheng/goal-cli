@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from .config import ConfigError, dump_config_summary, load_config, validate_config
-from .runtime import RuntimeOptions, cycle_run_dir, load_state, render_prompts_to_run_dir, reset_state, run_cycle, run_goal
+from .runtime import RuntimeOptions, heartbeat_run_dir, load_state, render_prompts_to_run_dir, reset_state, run_heartbeat, run_goal
 from .setup_check import DoctorOptions, doctor_exit_code, format_doctor_checks, run_doctor
 
 
@@ -101,13 +101,11 @@ def main(argv: list[str] | None = None) -> int:
     doctor_parser = subparsers.add_parser("doctor", help="Check artifact-loop setup readiness")
     doctor_parser.add_argument("--smoke-codex-goal", action="store_true", help="Run a minimal Codex /goal schema-output smoke check in a temp directory")
     doctor_parser.add_argument("--skip-openai-auth", action="store_true", help="Skip OPENAI_API_KEY readiness check for agent tik configs")
-    doctor_parser.add_argument("--timeout-seconds", type=float, default=10.0, help="Timeout for setup probes and optional smoke checks")
-    run_parser = subparsers.add_parser("run", help="Run cycles until complete, blocked, or budget-limited")
+    doctor_parser.add_argument("--timeout-seconds", type=float, default=10.0, help="Timeout for setup probes except the optional Codex smoke check")
+    doctor_parser.add_argument("--smoke-timeout-seconds", type=float, default=180.0, help="Timeout for the optional Codex /goal smoke check")
+    run_parser = subparsers.add_parser("run", help="Run one autonomous heartbeat")
     run_parser.add_argument("--dry-run", action="store_true", help="Render prompts without running producer, tik, or tok")
-    run_parser.add_argument("--max-cycles", type=int, default=15, help="Maximum cycles for this run")
-    run_parser.add_argument("--max-minutes", type=float, default=30.0, help="Maximum wall-clock minutes for this run")
-    cycle_parser = subparsers.add_parser("cycle", help="Run exactly one producer/tik/tok cycle")
-    cycle_parser.add_argument("--dry-run", action="store_true", help="Render prompts without running producer, tik, or tok")
+    run_parser.add_argument("--max-minutes", type=float, default=30.0, help="Maximum wall-clock minutes for this heartbeat")
     subparsers.add_parser("tik", help="Run producer plus tik, but skip tok")
     subparsers.add_parser("state", help="Print state JSON")
     subparsers.add_parser("reset", help="Remove state and stale lock; keep run artifacts")
@@ -134,6 +132,7 @@ def main(argv: list[str] | None = None) -> int:
                 smoke_codex_goal=getattr(args, "smoke_codex_goal", False),
                 skip_openai_auth=getattr(args, "skip_openai_auth", False),
                 timeout_seconds=getattr(args, "timeout_seconds", 10.0),
+                smoke_timeout_seconds=getattr(args, "smoke_timeout_seconds", 180.0),
             ),
         )
     if command == "state":
@@ -145,19 +144,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if command == "render-prompts":
         state = load_state(config)
-        run_dir = cycle_run_dir(config, state)
+        run_dir = heartbeat_run_dir(config, state)
         run_dir.mkdir(parents=True, exist_ok=True)
         render_prompts_to_run_dir(config, run_dir)
         print(f"Rendered prompts: {run_dir}")
         return 0
     if command == "tik":
-        result = run_cycle(config, RuntimeOptions(review_only=True))
-        print(result.message)
-        if result.run_dir:
-            print(f"Run directory: {result.run_dir}")
-        return result.exit_code
-    if command == "cycle":
-        result = run_cycle(config, RuntimeOptions(dry_run=getattr(args, "dry_run", False), max_cycles=1))
+        result = run_heartbeat(config, RuntimeOptions(review_only=True))
         print(result.message)
         if result.run_dir:
             print(f"Run directory: {result.run_dir}")
@@ -167,7 +160,6 @@ def main(argv: list[str] | None = None) -> int:
             config,
             RuntimeOptions(
                 dry_run=getattr(args, "dry_run", False),
-                max_cycles=getattr(args, "max_cycles", 15),
                 max_minutes=getattr(args, "max_minutes", 30.0),
             ),
         )

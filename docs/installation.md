@@ -179,7 +179,7 @@ Then adjust artifact paths, write dirs, and model names for that repository.
 ## no-mistakes Gate
 
 The no-mistakes integration has no interactive mode. It is enabled by default;
-every non-dry-run cycle starts from a checkpointed clean Git worktree, and
+every non-dry-run heartbeat starts from a checkpointed clean Git worktree, and
 successful source-repair or completion transitions are gated before the runtime
 continues.
 
@@ -201,7 +201,7 @@ When enabled, goal-cli always:
 5. runs `no-mistakes axi run --intent ... --yes`.
 
 `mode = "lightspeed"` is the default. It still uses no-mistakes, but passes
-`--skip review,test,document,lint,push,pr,ci` so routine cycles do not pay
+`--skip review,test,document,lint,push,pr,ci` so routine heartbeats do not pay
 the full review/test/docs/lint/PR/CI latency. Use `mode = "full"` for the full
 pipeline, or `mode = "fast"` to keep local quality steps but skip push/PR/CI.
 
@@ -222,7 +222,7 @@ endpoint = "http://localhost:4318/v1/traces"
 timeout_seconds = 5
 ```
 
-Each heartbeat emits spans for the cycle, heartbeat, producer, artifact load,
+Each heartbeat emits spans for heartbeat progress, producer, artifact load,
 tik, tok, and no-mistakes gate. `goal-cli` does not include a collector,
 database, queue, dashboard, or trace storage; those are supplied by the OTLP
 backend.
@@ -252,16 +252,10 @@ Prove the Codex tok path in a temporary workspace:
 goal-cli doctor --smoke-codex-goal
 ```
 
-Run one heartbeat/cycle:
+Run one heartbeat:
 
 ```bash
-goal-cli cycle
-```
-
-Run until complete, blocked, or budget-limited:
-
-```bash
-goal-cli run --max-cycles 15 --max-minutes 30
+goal-cli run --max-minutes 30
 ```
 
 Inspect state:
@@ -282,7 +276,7 @@ For one-off testing from another project:
 
 ```bash
 PYTHONPATH=/Users/siyaozheng/Documents/goal-cli/src \
-python3 -m goal_cli.cli -c goal.toml cycle
+python3 -m goal_cli.cli -c goal.toml run
 ```
 
 This uses the checked-out source tree directly.
