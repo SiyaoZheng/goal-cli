@@ -1,88 +1,208 @@
-# goal-cli
+<div align="center">
+  <img src=".github/assets/goal-cli-hero.svg" alt="goal-cli artifact loop: producer, tik, tok, heartbeat" width="100%" />
 
-`goal-cli` is an artifact-centered runtime for autonomous project loops.
+  <h1>goal-cli</h1>
 
-The goal is always a concrete product: a PDF, report, benchmark result, site,
-package, dataset, model checkpoint, or another canonical artifact. A heartbeat
-does one bounded pass:
+  <p><strong>Artifact-centered autonomy for projects where the final output is the only truth.</strong></p>
 
-1. run the producer command,
-2. verify the canonical artifact exists,
-3. run `tik`, which writes the artifact critique into `tik.md`,
-4. run one bounded `tok` source-repair pass only if `tik` fails the artifact.
+  <p>
+    <a href="https://github.com/SiyaoZheng/goal-cli"><img alt="GitHub repository" src="https://img.shields.io/badge/GitHub-SiyaoZheng%2Fgoal--cli-181717?logo=github"></a>
+    <img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white">
+    <img alt="Package version" src="https://img.shields.io/badge/version-0.1.0-0B7285">
+    <img alt="OpenTelemetry traces" src="https://img.shields.io/badge/traces-OpenTelemetry-000000?logo=opentelemetry&logoColor=white">
+    <img alt="Local first" src="https://img.shields.io/badge/runtime-local--first-2F9E44">
+  </p>
 
-`tok` never completes the goal directly. A later heartbeat may rebuild the
-artifact and let `tik` mark the goal complete.
+  <p>
+    <a href="#quick-start">Quick Start</a>
+    <span> . </span>
+    <a href="#the-loop">The Loop</a>
+    <span> . </span>
+    <a href="#configuration">Configuration</a>
+    <span> . </span>
+    <a href="#command-deck">Commands</a>
+    <span> . </span>
+    <a href="#docs">Docs</a>
+  </p>
+</div>
+
+---
+
+`goal-cli` turns a big project objective into a repeatable heartbeat:
+build the canonical artifact, critique only that artifact, make one bounded
+source repair if the artifact fails, then exit with state ready for the next
+heartbeat.
+
+It is built for work where "done" cannot mean "the agent edited files." Done
+means the product exists and passes its evaluator: a PDF, benchmark result,
+report, site, dataset, model checkpoint, package, or another artifact that can
+be rebuilt from source.
+
+## Why It Exists
+
+Autonomous project loops usually fail for boring reasons: the success target is
+vague, the agent grades its own work, state lives in chat, generated outputs get
+edited directly, or a long run loses track of the actual deliverable.
+
+`goal-cli` makes those failure modes explicit:
+
+| Problem | `goal-cli` answer |
+| --- | --- |
+| The target drifts | One canonical artifact is the success standard. |
+| The agent judges itself | `tik` reviews the rebuilt artifact before any source repair. |
+| The loop mutates random files | `tok.write_dirs` bounds what the repair pass may edit. |
+| Progress is conversational | State, heartbeats, prompts, reports, and traces are written to `.goal/`. |
+| A repair claims victory | Only a later producer plus passing `tik` can complete the goal. |
+| Local quality gates get skipped | The optional no-mistakes gate checkpoints and reviews transitions. |
 
 ## Quick Start
 
+Install from this checkout:
+
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install --upgrade pip
 python3 -m pip install -e .
+```
+
+Create and check a goal:
+
+```bash
 goal-cli init
+$EDITOR goal.toml
 goal-cli validate
 goal-cli doctor
+```
+
+Run one heartbeat:
+
+```bash
 goal-cli run
 goal-cli state
 ```
 
-See [docs/artifact-goal-notes.md](docs/artifact-goal-notes.md) for the design
-notes, [docs/installation.md](docs/installation.md) for local installation,
-[docs/config-schema.md](docs/config-schema.md) for `goal.toml`, and
-[examples/scientificity/goal.toml](examples/scientificity/goal.toml) for a
-PDF-first research workflow.
+For model-based `tik` reviews:
 
-## Runtime Architecture
-
-The implementation keeps four internal seams narrow:
-
-- Git Gate: `NoMistakesGate` owns clean checkpoints, feature branches,
-  lightspeed/full skip presets, readiness flags, and `no-mistakes axi run`.
-- Heartbeat State: `HeartbeatRecorder` owns heartbeat state, history,
-  heartbeat emission, terminal transitions, and no-mistakes state recording.
-- Tok Execution: `tok_execution` owns the Codex `/goal` prompt, JSON Schema,
-  command construction, report validation, and diagnostic files.
-- Readiness/Telemetry: `doctor` and runtime share the same tok execution path
-  and `TelemetryExportPlan`, so setup checks describe the path the runtime will
-  actually use.
-
-## no-mistakes Gate
-
-`goal-cli` hands each committed checkpoint to
-[`kunchenguid/no-mistakes`](https://github.com/kunchenguid/no-mistakes). The
-gate is enabled by default:
-
-```toml
-[no_mistakes]
-binary = "no-mistakes"
-mode = "lightspeed"
+```bash
+python3 -m pip install -e '.[openai]'
+export OPENAI_API_KEY="..."
+goal-cli doctor
 ```
 
-When enabled, each non-dry-run heartbeat starts from a clean Git worktree. If the
-repo is on the default branch, goal-cli creates a `goal-cli/...` feature branch.
-If the worktree is dirty, goal-cli commits a checkpoint, then successful `tok`
-or completion heartbeats run `no-mistakes axi run --intent ... --yes`.
-Runtime state under `.goal/` is kept out of commits through `.git/info/exclude`.
+Use `goal-cli doctor --skip-openai-auth` only when auth is intentionally supplied
+outside the environment.
 
-The default `mode = "lightspeed"` uses no-mistakes' native `--skip` support to
-avoid the high-latency `review`, `test`, `document`, `lint`, `push`, `pr`, and
-`ci` steps. Set `mode = "full"` when a release branch needs the complete
-no-mistakes pipeline.
+Use `goal-cli doctor --smoke-codex-goal` when setup should prove the internal
+Codex `/goal` tok path too.
 
-There is no interactive no-mistakes mode in goal-cli. Missing Git setup, a
-missing binary, or a failed gate stops the run with
-`blocked_no_mistakes_failed`; otherwise the gate is driven unattended. Use
-`enabled = false` only for isolated tests or diagnostics outside Git.
+## The Loop
+
+```mermaid
+flowchart LR
+    A["goal.toml"] --> B["producer command"]
+    B --> C["canonical artifact"]
+    C --> D{"tik verdict"}
+    D -- "ready" --> E["complete"]
+    D -- "blockers" --> F["tik.md ledger"]
+    F --> G["tok: bounded source repair"]
+    G --> H["schema-checked tok report"]
+    H --> I["next heartbeat"]
+    I --> B
+```
+
+Each `goal-cli run` executes exactly one heartbeat:
+
+1. Load file-backed state and acquire a lock.
+2. Run the configured producer command.
+3. Verify the canonical artifact exists.
+4. Run `tik` against the artifact and write `tik.md`.
+5. If `tik` passes, mark the goal complete.
+6. If `tik` fails, launch one bounded `tok` source-repair pass.
+7. Validate the tok JSON report, write state, and exit.
+
+The important constraint is asymmetric: `tok` can improve sources, but `tok`
+cannot complete the artifact-level goal. Completion belongs to a later rebuild
+and a passing `tik`.
+
+## Configuration
+
+A goal is a single `goal.toml` file. The minimal shape is:
+
+```toml
+name = "paper-ready"
+state_dir = ".goal"
+runs_dir = ".goal/runs"
+
+[artifact]
+path = "output/full_paper.pdf"
+copy_as = "full_paper.pdf"
+
+[producer]
+command = "make all"
+
+[tik]
+provider = "oracle"
+command = "python3 scripts/tik.py"
+
+[tok]
+provider = "codex_goal"
+write_dirs = ["writing", "src"]
+sandbox = "workspace-write"
+codex_features = ["goals"]
+
+[safety]
+generated_dirs = ["output", "build"]
+max_blocker_repeats = 3
+```
+
+Start from the PDF-first example when the deliverable is a manuscript:
+
+```bash
+cp examples/scientificity/goal.toml ./goal.toml
+```
+
+Then edit the artifact path, producer command, writable scopes, and evaluator.
+
+## Runtime Roles
+
+| Role | Owns | Rule |
+| --- | --- | --- |
+| Producer | Rebuilds the artifact from source | It must create the canonical artifact path. |
+| Tik | Artifact critique | It sees the artifact and writes `tik.md`. |
+| Tok | Source repair | It receives the whole `tik.md` ledger and edits only allowed source dirs. |
+| Heartbeat | Liveness and state | It performs one bounded cycle, records the result, and exits. |
+| Gate | Git quality boundary | no-mistakes can checkpoint and review source transitions. |
+
+Public `tik` modes:
+
+- `oracle`: deterministic scripts, tests, metrics, or machine checks.
+- `agent`: model-based artifact critique.
+
+Production `tok` mode:
+
+- `codex_goal`: launches an internal Codex `/goal` with a JSON Schema-checked
+  final report.
+
+## Command Deck
+
+| Command | What it does |
+| --- | --- |
+| `goal-cli init` | Create a starter `goal.toml`. |
+| `goal-cli validate` | Check config, artifact paths, and writable scopes. |
+| `goal-cli doctor` | Check whether this goal can run end to end. |
+| `goal-cli run` | Execute one autonomous heartbeat. |
+| `goal-cli tik` | Run producer plus tik, but skip tok. |
+| `goal-cli render-prompts` | Write rendered tik and tok prompts into a run directory. |
+| `goal-cli state` | Print `.goal/state.json` or the default initial state. |
+| `goal-cli reset` | Remove state and stale locks while preserving run artifacts. |
 
 ## Observability
 
-OpenTelemetry tracing is enabled by default. `goal-cli` emits standard OTLP
-HTTP spans for the heartbeat, producer, artifact load, `tik`, `tok`,
-and no-mistakes gate. It does not implement a collector, storage
-layer, or dashboard. If the configured OTLP receiver is not reachable and no
-OTLP endpoint was explicitly set through the environment, `goal-cli` falls back
-to local agent-readable JSONL traces at `.goal/observability/traces.jsonl`.
+OpenTelemetry tracing is on by default. Runtime spans cover the heartbeat,
+producer, artifact load, tik, tok, and no-mistakes gate.
 
-By default traces go to:
+Default endpoint:
 
 ```toml
 [observability]
@@ -91,9 +211,14 @@ endpoint = "http://localhost:4318/v1/traces"
 timeout_seconds = 5
 ```
 
-Run any OTLP-compatible backend or collector on that endpoint when you want
-external trace storage. For collector-managed local traces, use the existing
-OpenTelemetry Collector Contrib image with the file exporter:
+If no configured OTLP receiver is reachable and no OTLP endpoint was explicitly
+set through the environment, `goal-cli` writes local fallback traces to:
+
+```text
+.goal/observability/traces.jsonl
+```
+
+For collector-managed local traces:
 
 ```bash
 mkdir -p .goal/observability
@@ -106,75 +231,68 @@ docker run --rm --name goal-cli-otel \
   --config=/etc/otelcol-contrib/config.yaml
 ```
 
-Then run `goal-cli run` and inspect either the collector
-output in `.goal/observability/` or the fallback `.goal/observability/traces.jsonl`.
-Standard OpenTelemetry environment variables such as
-`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_ENDPOINT`,
-`OTEL_SERVICE_NAME`, and `OTEL_TRACES_EXPORTER=none` are respected.
+## Git Gate
 
-## Core Commands
+`goal-cli` can hand committed checkpoints to
+[`kunchenguid/no-mistakes`](https://github.com/kunchenguid/no-mistakes).
+The gate is enabled by default:
 
-- `goal-cli init` creates a starter `goal.toml`.
-- `goal-cli validate` checks config, artifact paths, and writable scopes.
-- `goal-cli run` runs one autonomous heartbeat.
-- `goal-cli tik` runs producer plus tik without a tok pass.
-- `goal-cli render-prompts` writes rendered tik and tok prompts.
-- `goal-cli state` prints `.goal/state.json` or the default initial state.
-- `goal-cli reset` removes state and stale locks, preserving run artifacts.
-- `goal-cli doctor` checks whether the configured artifact loop is ready for one-command execution.
+```toml
+[no_mistakes]
+enabled = true
+binary = "no-mistakes"
+mode = "lightspeed"
+branch_prefix = "goal-cli"
+```
 
-## Setup Readiness
+When enabled, non-dry-run heartbeats start from a clean Git worktree. If the
+repo is on the default branch, `goal-cli` creates a `goal-cli/...` feature
+branch. Runtime files under `.goal/` are excluded through `.git/info/exclude`.
 
-`goal-cli doctor` answers the static setup question: can this config start
-`goal-cli run` with valid paths, commands, writable scopes, and Codex CLI
-capabilities?
+`mode = "lightspeed"` uses no-mistakes with high-latency steps skipped. Use
+`mode = "fast"` or `mode = "full"` when a branch needs stronger local or release
+gates.
 
-The default doctor is non-destructive. It validates config and writable-scope
-safety, checks that artifact/state/run paths can be created, verifies configured
-producer and oracle tik executables where the shell command is statically
-knowable, checks Codex CLI availability, and verifies that `codex exec` supports
-the flags required for schema-checked `codex_goal` execution.
+## Internal Shape
 
-For agent tik providers, doctor also checks that the `openai` Python package is
-importable and that `OPENAI_API_KEY` is set. Use `--skip-openai-auth` only when
-the auth layer is intentionally supplied outside the environment.
+The implementation keeps four module seams narrow:
 
-Use this deeper probe when setup should prove the one-click internal tok
-path too:
+| Seam | Responsibility |
+| --- | --- |
+| Git Gate | `NoMistakesGate` owns clean checkpoints, feature branches, skip presets, readiness flags, and `no-mistakes axi run`. |
+| Heartbeat State | `HeartbeatRecorder` owns state, history, heartbeat emission, transitions, and no-mistakes state recording. |
+| Tok Execution | `tok_execution` owns Codex `/goal` command construction, JSON Schema validation, prompt files, reports, and diagnostics. |
+| Readiness and Telemetry | `doctor` and runtime share tok execution and `TelemetryExportPlan`, so setup checks describe the real path. |
+
+## Development
 
 ```bash
-goal-cli doctor --smoke-codex-goal
+python3 -m pip install -e '.[openai]'
+python3 -m pytest -q
+goal-cli --help
 ```
 
-The smoke check launches a minimal Codex `/goal` tok in a temporary workspace,
-validates the schema-shaped tok report, and does not touch project sources.
-`one_click_artifact_loop` is only marked ready after this tok path is proven.
+If `pytest` is not installed in your active environment, install it in the same
+virtualenv used for development:
 
-## Runtime Rule
-
-After the producer, the runtime has two sequential roles:
-
-- `tik`: reviews the canonical artifact and writes a Markdown ledger at
-  `tik.md`. Public tik modes are `oracle` for deterministic scripts, tests, and
-  metrics; and `agent` for model critique.
-- `tok`: consumes the whole `tik.md` ledger and performs one bounded source
-  repair. The default tok mode is `codex_goal`, an internal Codex `/goal`.
-
-Runtime prompts should describe a closed operational system: artifact, producer,
-tik ledger, writable scopes, state, and budgets. Tok prompts are launched as
-internal Codex goals through the `codex_goal` provider. They should not include
-an approval path or imply that a person can decide the goal during the loop.
-
-Tok reports are machine-checked JSON. A successful source revision reports:
-
-```json
-{
-  "source_change_possible": true,
-  "revision_strategy": "one sentence",
-  "sources_changed": ["path"],
-  "expected_artifact_visible_improvement": ["visible change in next artifact"],
-  "remaining_artifact_bottleneck": "one sentence"
-}
+```bash
+python3 -m pip install pytest
 ```
 
-Only a later heartbeat that reruns the producer and passes tik can complete the goal.
+## Docs
+
+- [Installing goal-cli](docs/installation.md)
+- [goal.toml schema](docs/config-schema.md)
+- [Artifact-centered design notes](docs/artifact-goal-notes.md)
+- [Codex goal implementation report](docs/codex-goal-openai-implementation-report.md)
+- [PDF-first example goal](examples/scientificity/goal.toml)
+- [OpenTelemetry Collector file exporter config](docs/otel-collector-file.yaml)
+
+## Status
+
+`goal-cli` is early local tooling, currently published as version `0.1.0`.
+It is useful when you already know the artifact, producer command, evaluator,
+and writable source surface.
+
+No license file is included yet. Add one before accepting external
+contributions or using this as a dependency in another public project.
