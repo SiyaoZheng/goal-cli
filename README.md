@@ -1,15 +1,15 @@
 <p align="center">
-  <img src=".github/assets/goal-cli-readme-cover.png" alt="goal-cli, Master coding agent for non-coders" width="100%" />
+  <img src=".github/assets/goal-cli-readme-cover.png" alt="goal-cli, control coding work without reading code" width="100%" />
 </p>
 
 <p align="center">
-  <a href="#install"><strong>Run a heartbeat</strong></a>
+  <a href="#run-a-heartbeat"><strong>Run a heartbeat</strong></a>
   &nbsp;/&nbsp;
   <a href="#pick-your-artifact">Pick your artifact</a>
   &nbsp;/&nbsp;
-  <a href="#the-loop">See the loop</a>
+  <a href="#see-the-loop">See the loop</a>
   &nbsp;/&nbsp;
-  <a href="#configuration">Configure it</a>
+  <a href="#configure-it">Configure it</a>
 </p>
 
 <p align="center">
@@ -19,45 +19,42 @@
   <kbd>local-first</kbd>
 </p>
 
-<h2 align="center">If you can judge the output, you can run the agent.</h2>
+<h2 align="center">If you can judge the output, you can control the coding work.</h2>
 
 <p align="center">
-  <code>goal-cli</code> turns coding-agent work into a rebuild, review, repair loop. The agent can edit code. You accept only the artifact: paper, poster, report, research note, or app.
+  <code>goal-cli</code> is not an agent. It is an artifact-first control loop for people who use coding agents but judge the finished output.
 </p>
 
 ## Pick Your Artifact
 
-<table>
-  <tr>
-    <td width="20%" valign="top">
-      <strong>Scholar</strong><br />
-      Paper, appendix, replication packet.<br /><br />
-      The PDF rebuilds before the claim counts.
-    </td>
-    <td width="20%" valign="top">
-      <strong>Designer</strong><br />
-      Poster, landing page, campaign visual.<br /><br />
-      The exported work has to match the brief.
-    </td>
-    <td width="20%" valign="top">
-      <strong>Hobbyist</strong><br />
-      Your own small app.<br /><br />
-      The demo must run before the agent gets credit.
-    </td>
-    <td width="20%" valign="top">
-      <strong>Accountant</strong><br />
-      Report, workbook, reconciliation export.<br /><br />
-      Tables and numbers regenerate before review.
-    </td>
-    <td width="20%" valign="top">
-      <strong>Brokerage analyst</strong><br />
-      Research report, chart pack, sector note.<br /><br />
-      Charts, tables, wording, and sources update together.
-    </td>
-  </tr>
-</table>
+<p align="center">
+  <img src=".github/assets/goal-cli-personas.png" alt="Five goal-cli users: scholar, designer, hobbyist, accountant, and analyst" width="100%" />
+</p>
 
-## Install
+The right artifact is the thing you already know how to reject. `goal-cli`
+does not ask you to become a code reviewer. It asks you to name the output that
+must be rebuilt before any source repair gets credit.
+
+| If your real question is | Make this the artifact |
+| --- | --- |
+| "Show me the PDF." | Paper, appendix, slide deck, replication packet. |
+| "Show me the poster." | Poster, landing page, campaign visual, export folder. |
+| "Does my app run?" | Local demo, built site, packaged app, smoke-test report. |
+| "Do the numbers tie?" | Workbook, reconciliation export, financial report. |
+| "Does the chart move?" | Research report, chart pack, sector note, source-backed memo. |
+
+## Run a Heartbeat
+
+A heartbeat is one controlled pass through the system. Install the CLI, name
+the artifact, validate the setup, then run exactly one rebuild-review-repair
+cycle.
+
+| Checkpoint | Command | You should know |
+| --- | --- | --- |
+| Install locally | `python3 -m pip install -e .` | The CLI runs from this checkout. |
+| Create a goal | `goal-cli init` | You now have a starter `goal.toml`. |
+| Validate the brief | `goal-cli validate` and `goal-cli doctor` | Paths, scopes, and providers are checked before the run. |
+| Run one heartbeat | `goal-cli run` | The artifact is rebuilt before success can be recorded. |
 
 ```bash
 python3 -m venv .venv
@@ -86,10 +83,15 @@ goal-cli doctor
 ```
 
 Use `goal-cli doctor --smoke-codex-goal` when setup should prove the internal
-Codex `/goal` tok path too. Use `--skip-openai-auth` only when auth is supplied
-outside the environment.
+Codex `/goal` tok path too. If tik uses `codex_file`, add
+`--smoke-codex-file-tik` so doctor also proves Codex can review a temporary
+single-file artifact copy and return a parseable tik verdict. Use
+`--skip-openai-auth` only when auth is supplied outside the environment.
 
-## The Loop
+## See the Loop
+
+The loop is a standard of proof. The repair pass can edit sources, but it
+cannot declare victory. Only a later rebuilt artifact can pass.
 
 ```mermaid
 flowchart LR
@@ -124,7 +126,7 @@ flowchart LR
   </tr>
 </table>
 
-One run is one heartbeat:
+The same loop in plain English:
 
 | Runtime action | Boundary |
 | --- | --- |
@@ -136,9 +138,9 @@ One run is one heartbeat:
 
 ## Why It Exists
 
-| When coding agents feel like magic | `goal-cli` gives you a handle |
+| When AI coding feels like magic | `goal-cli` gives you a handle |
 | --- | --- |
-| "The agent says it fixed the app." | The site or build artifact is regenerated before the goal can pass. |
+| "The chat says it fixed the app." | The site or build artifact is regenerated before the goal can pass. |
 | "I cannot audit the diff." | Judge the artifact: paper, poster, report, research report, dataset, or app. |
 | "The chat got too long to trust." | State, prompts, reports, locks, and traces live under `.goal/`. |
 | "The repair pass declared success." | `tok` can only change sources. Completion belongs to artifact review. |
@@ -153,7 +155,19 @@ You stay in charge of the parts you can judge:
 | The writable surface | `tok` repairs only the configured source directories. |
 | The heartbeat | Every run records state, traces, reports, and the next action. |
 
-## Configuration
+## Configure It
+
+Treat `goal.toml` as the brief you would give the control loop if you were being
+precise. The file says what output matters, how to rebuild it, who judges it,
+and where repairs are allowed.
+
+| Decision | Plain-English meaning | Field |
+| --- | --- | --- |
+| Artifact | The thing you can inspect and reject. | `[artifact].path` |
+| Producer | The command that rebuilds that thing. | `[producer].command` |
+| Tik | The critic that reviews the rebuilt artifact. | `[tik]` |
+| Tok | The source-repair pass that runs after artifact failure. | `[tok]` |
+| Safety | Generated folders, write scopes, and blocker policy. | `[safety]` |
 
 A goal is one `goal.toml` file:
 

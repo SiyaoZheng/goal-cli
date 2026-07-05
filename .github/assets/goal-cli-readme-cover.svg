@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="680" viewBox="0 0 1200 680" role="img" aria-labelledby="title desc">
-  <title id="title">goal-cli, Master coding agent for non-coders</title>
-  <desc id="desc">A product cover for goal-cli showing a master control layer for scholars, designers, hobbyists, accountants, and brokerage analysts.</desc>
+  <title id="title">goal-cli, control coding work without reading code</title>
+  <desc id="desc">A product cover for goal-cli showing an artifact-first control loop for scholars, designers, hobbyists, accountants, and brokerage analysts.</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#101114"/>
@@ -26,13 +26,13 @@
 
   <g transform="translate(62 134)">
     <text x="0" y="0" fill="#fff9ec" font-family="Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="72" font-weight="850" letter-spacing="-2">
-      <tspan x="0" dy="0">Master coding</tspan>
-      <tspan x="0" dy="82">agents without</tspan>
+      <tspan x="0" dy="0">Control coding</tspan>
+      <tspan x="0" dy="82">work without</tspan>
       <tspan x="0" dy="82">reading code</tspan>
     </text>
     <text x="4" y="282" fill="#d8d0bd" font-family="Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="24" font-weight="450">
       <tspan x="4" dy="0">Define the artifact. Rebuild it. Let a critic</tspan>
-      <tspan x="4" dy="38">reject weak outputs before you trust the agent.</tspan>
+      <tspan x="4" dy="38">reject weak outputs before you trust the fix.</tspan>
     </text>
   </g>
 
@@ -67,7 +67,7 @@
     <rect x="22" y="22" width="364" height="312" rx="22" fill="#111217"/>
     <image href="goal-cli-logo-generated.png" x="58" y="42" width="292" height="243" preserveAspectRatio="xMidYMid meet"/>
     <rect x="54" y="282" width="300" height="34" rx="17" fill="url(#green)" fill-opacity="0.18"/>
-    <text x="204" y="305" text-anchor="middle" fill="#fff7e6" font-family="Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="15" font-weight="750" letter-spacing="1.6">ARTIFACT-FIRST CONTROL</text>
+    <text x="204" y="305" text-anchor="middle" fill="#fff7e6" font-family="Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="15" font-weight="750" letter-spacing="1.6">ARTIFACT-FIRST CONTROL LOOP</text>
   </g>
 
   <g transform="translate(740 458)" font-family="Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif">
