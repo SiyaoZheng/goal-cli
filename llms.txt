@@ -181,6 +181,9 @@ blocking command and output, then give the smallest next action.
 
 - [PDF-first example](examples/scientificity/goal.toml): Research-paper setup
   where THE THING is the rebuilt PDF.
+- [PDF-first example, Claude Code tik](examples/scientificity-claude-tik/goal.toml):
+  The same setup with the referee pass run by Claude Code via the
+  `/apsr-review` slash skill.
 
 ## Optional
 

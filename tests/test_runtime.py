@@ -839,6 +839,46 @@ class GoalRuntimeTests(unittest.TestCase):
                 ((root / "output").resolve(), (root / "build").resolve(), (root / "logs").resolve()),
             )
 
+    def test_scientificity_claude_tik_example_matches_codex_example_with_claude_code_file(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        codex_config = load_config(repo_root / "examples" / "scientificity" / "goal.toml")
+        claude_config = load_config(repo_root / "examples" / "scientificity-claude-tik" / "goal.toml")
+
+        self.assertEqual(claude_config.tik.provider, "claude_code_file")
+        self.assertEqual(claude_config.tok.provider, "codex_goal")
+        self.assertTrue(claude_config.tik.prompt.startswith("/apsr-review\n"))
+        self.assertEqual(claude_config.tik.prompt, codex_config.tik.prompt)
+        self.assertEqual(claude_config.tik.verdict, codex_config.tik.verdict)
+        self.assertEqual(claude_config.tok.prompt_template, codex_config.tok.prompt_template)
+        self.assertEqual(claude_config.artifact.copy_as, codex_config.artifact.copy_as)
+        self.assertEqual(
+            [path.name for path in claude_config.tok.write_dirs],
+            [path.name for path in codex_config.tok.write_dirs],
+        )
+        self.assertEqual(
+            [path.name for path in claude_config.tok.runtime_write_dirs],
+            [path.name for path in codex_config.tok.runtime_write_dirs],
+        )
+
+    def test_scientificity_claude_tik_example_validates_after_copy_to_project_root(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        example_text = (repo_root / "examples" / "scientificity-claude-tik" / "goal.toml").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "output").mkdir()
+            (root / "build").mkdir()
+            (root / "logs").mkdir()
+            (root / "src").mkdir()
+            (root / "data").mkdir()
+            (root / "writing").mkdir()
+            config_path = root / "goal.toml"
+            config_path.write_text(example_text, encoding="utf-8")
+
+            config = load_config(config_path)
+
+            self.assertEqual(validate_config(config), [])
+            self.assertEqual(config.tik.provider, "claude_code_file")
+
     def test_validate_rejects_wrong_tok_provider_and_runtime_prompt_language(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

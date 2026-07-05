@@ -189,6 +189,16 @@ For a PDF-first research project, start from:
 cp /Users/siyaozheng/Documents/goal-cli/examples/scientificity/goal.toml ./goal.toml
 ```
 
+For the same project with the referee pass run by Claude Code instead of Codex:
+
+```bash
+cp /Users/siyaozheng/Documents/goal-cli/examples/scientificity-claude-tik/goal.toml ./goal.toml
+```
+
+Both examples invoke the `/apsr-review` slash skill on the first prompt line;
+the skill must be installed in the reviewing CLI (Codex skill config for
+`codex_file`, `~/.claude/skills/apsr-review/` for `claude_code_file`).
+
 Then adjust artifact paths, write dirs, tik provider settings, and the producer
 command for that repository.
 
