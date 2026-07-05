@@ -175,7 +175,7 @@ Then edit `goal.toml` so:
 - `[producer].command` rebuilds that artifact from sources.
 - `[tik]` either runs a deterministic oracle command, an OpenAI file-upload
   agent review, or a Codex local-file review.
-- `[tok].write_dirs` contains only source directories the tok may edit.
+- `[tok].write_dirs` contains the source directories that count as valid tok edits.
 - `[tok].run_cwd`, when set, is where the tok process starts commands.
 - `[tok].runtime_write_dirs` contains generated directories that commands may
   refresh without making them source-edit scopes.
@@ -195,8 +195,8 @@ command for that repository.
 
 The no-mistakes integration has no interactive mode. It is enabled by default;
 every non-dry-run heartbeat starts from a checkpointed clean Git worktree, and
-successful source-change or completion transitions are gated before the runtime
-continues.
+successful source-change or completion transitions are checkpointed before the
+runtime continues.
 
 ```toml
 [no_mistakes]
@@ -212,15 +212,21 @@ When enabled, goal-cli always:
 1. stays on the current branch and treats it as the single-person mainline;
 2. ignores `.goal/` runtime files through `.git/info/exclude`;
 3. commits dirty project files as a checkpoint;
-4. runs `no-mistakes init`;
-5. runs `no-mistakes axi run --intent ... --yes [--skip ...]`.
+4. on non-default branches, runs `no-mistakes init`;
+5. on non-default branches, runs
+   `no-mistakes axi run --intent ... --yes [--skip ...]`.
+
+On default branches such as `main` or `master`, goal-cli records
+`no_mistakes_default_branch_skipped` after checkpointing. This preserves the
+single-person mainline workflow because no-mistakes itself refuses to validate
+default branches and tells users to create a feature branch.
 
 `mode = "lightspeed"` is the default. It still uses no-mistakes, but passes
 `--skip review,test,document,lint,push,pr,ci` so routine heartbeats do not pay
 the full review/test/docs/lint/PR/CI latency. Use `mode = "full"` for the full
 pipeline, or `mode = "fast"` to keep local quality steps but skip push/PR/CI.
 
-If Git, no-mistakes, or the gate fails, the run exits as
+If Git setup, no-mistakes availability, or a non-default-branch gate fails, the run exits as
 `blocked_no_mistakes_failed`.
 
 If the heartbeat wall-clock budget expires during no-mistakes preparation or

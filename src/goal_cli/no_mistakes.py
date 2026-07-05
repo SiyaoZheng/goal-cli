@@ -74,6 +74,24 @@ class NoMistakesGate:
             return _unavailable("no_mistakes_no_git_repository", "project is not inside a Git repository")
 
         log_path = run_dir / f"no_mistakes_{phase}.log"
+        if _branch_is_default(self.config, repo, prepared.branch, deadline):
+            detail = (
+                "no-mistakes axi run skipped on the default branch; goal-cli "
+                "kept the current branch as the single-person mainline and "
+                f"checkpointed commit {prepared.commit}"
+            )
+            _append_log_message(log_path, detail)
+            return NoMistakesResult(
+                True,
+                "no_mistakes_default_branch_skipped",
+                detail,
+                repo,
+                prepared.branch,
+                prepared.commit,
+                log_path,
+                skipped=True,
+            )
+
         if _deadline_exhausted(deadline):
             return _budget_exhausted("run budget exhausted before no-mistakes gate", repo, prepared.branch, prepared.commit, log_path)
         init_timeout = _effective_no_mistakes_timeout(self.config, deadline)
@@ -229,6 +247,31 @@ def _short_head(config: GoalConfig, repo: Path, deadline: float | None) -> str |
     result = _run_git(repo, ["rev-parse", "--short", "HEAD"], timeout_seconds=_effective_no_mistakes_timeout(config, deadline))
     _raise_if_git_timed_out(result, deadline, "git HEAD summary before no-mistakes")
     return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
+
+
+def _branch_is_default(config: GoalConfig, repo: Path, branch: str | None, deadline: float | None) -> bool:
+    if branch is None:
+        return False
+    default_names = {"main", "master"}
+    remote_default = _origin_default_branch(config, repo, deadline)
+    if remote_default:
+        default_names.add(remote_default)
+    return branch in default_names
+
+
+def _origin_default_branch(config: GoalConfig, repo: Path, deadline: float | None) -> str | None:
+    result = _run_git(
+        repo,
+        ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+        timeout_seconds=_effective_no_mistakes_timeout(config, deadline),
+    )
+    _raise_if_git_timed_out(result, deadline, "git origin default branch discovery before no-mistakes")
+    if result.returncode != 0:
+        return None
+    text = result.stdout.strip()
+    if not text:
+        return None
+    return text.rsplit("/", 1)[-1]
 
 
 def _git_dirty_entries(config: GoalConfig, repo: Path, deadline: float | None) -> tuple[str, ...]:
@@ -396,6 +439,13 @@ def _run_logged(command: list[str], cwd: Path, log_path: Path, timeout_seconds: 
             log_file.write(result.stderr)
         log_file.write(f"\nexit_code={result.returncode}\n")
     return result
+
+
+def _append_log_message(log_path: Path, message: str) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as log_file:
+        log_file.write(message)
+        log_file.write("\n")
 
 
 def _terminate_process_tree(process: subprocess.Popen[str]) -> None:

@@ -18,14 +18,12 @@ TOK_REPORT_SCHEMA: dict[str, Any] = {
     "required": [
         "source_change_possible",
         "revision_strategy",
-        "sources_changed",
         "expected_artifact_visible_improvement",
         "remaining_artifact_bottleneck",
     ],
     "properties": {
         "source_change_possible": {"type": "boolean"},
         "revision_strategy": {"type": "string", "minLength": 1},
-        "sources_changed": {"type": "array", "items": {"type": "string"}},
         "expected_artifact_visible_improvement": {"type": "array", "items": {"type": "string"}},
         "remaining_artifact_bottleneck": {"type": "string"},
     },
@@ -175,11 +173,8 @@ def tok_report_errors(report: dict[str, Any] | None) -> list[str]:
     for field in ("revision_strategy", "remaining_artifact_bottleneck"):
         if field in report and (not isinstance(report[field], str) or not report[field].strip()):
             errors.append(f"{field} must be a non-empty string")
-    for field in ("sources_changed", "expected_artifact_visible_improvement"):
-        if field in report and not _is_string_list(report[field]):
-            errors.append(f"{field} must be a list of strings")
-    if report.get("source_change_possible") is True and report.get("sources_changed") == []:
-        errors.append("sources_changed must be non-empty when source_change_possible is true")
+    if "expected_artifact_visible_improvement" in report and not _is_string_list(report["expected_artifact_visible_improvement"]):
+        errors.append("expected_artifact_visible_improvement must be a list of strings")
     return errors
 
 

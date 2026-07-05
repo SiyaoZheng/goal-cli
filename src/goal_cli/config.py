@@ -15,6 +15,7 @@ TERMINAL_STATUSES = {
     "blocked_unparseable_tik",
     "blocked_repeated_same_objection",
     "blocked_no_source_change_possible",
+    "blocked_tok_no_source_changes",
 }
 
 NO_MISTAKES_SKIP_STEPS = {
@@ -239,7 +240,7 @@ def load_config(config_path: str | Path = "goal.toml") -> GoalConfig:
     artifact_raw = _required_table(raw, "artifact")
     artifact = ArtifactConfig(
         path=_path(_required_str(artifact_raw, "path"), root, root),
-        copy_as=_optional_str(artifact_raw, "copy_as"),
+        copy_as=_optional_filename(artifact_raw, "copy_as"),
     )
 
     producer_raw = _required_table(raw, "producer")
@@ -603,6 +604,16 @@ def _optional_str(raw: dict[str, Any], key: str) -> str | None:
     if not isinstance(value, str) or not value.strip():
         raise ConfigError(f"{key} must be a non-empty string when provided")
     return value.strip()
+
+
+def _optional_filename(raw: dict[str, Any], key: str) -> str | None:
+    value = _optional_str(raw, key)
+    if value is None:
+        return None
+    path = Path(value)
+    if path.name != value or value in {".", ".."}:
+        raise ConfigError(f"{key} must be a filename, not a path: {value}")
+    return value
 
 
 def _bool(value: Any, default: bool, label: str) -> bool:

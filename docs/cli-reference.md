@@ -12,7 +12,7 @@ subcommand.
 usage: goal-cli [-h] [-c CONFIG]
                 {init,validate,doctor,run,tik,heartbeat,state,reset,cleanup,render-prompts} ...
 
-Make agents finish THE THING.
+Configure and run artifact-centered heartbeats for coding agents.
 
 options:
   -h, --help            show this help message and exit
@@ -20,19 +20,19 @@ options:
 
 commands:
   {init,validate,doctor,run,tik,heartbeat,state,reset,cleanup,render-prompts}
-    init                Create a starter goal.toml
-    validate            Validate config, prompt placeholders, and writable
+    init                Create a starter artifact goal.toml
+    validate            Validate goal.toml, prompt placeholders, and writable
                         scopes
-    doctor              Check whether the thing-centered setup is ready
+    doctor              Check setup readiness before a heartbeat
     run                 Run one autonomous heartbeat
-    tik                 Run producer plus tik review, but skip tok
+    tik                 Rebuild the artifact and run tik review, but skip tok
     heartbeat           Install or run the system-level heartbeat
     state               Print state JSON or the default initial state
     reset               Remove state and stale lock while preserving run
                         artifacts
     cleanup             Clean interrupted heartbeat locks and optional orphan
                         provider processes
-    render-prompts      Render tik and tok prompts into a new run directory
+    render-prompts      Render tik and tok prompts without running providers
 
 Omitting the command defaults to run. Use 'goal-cli <command> -h' for
 subcommand options.
@@ -43,7 +43,8 @@ subcommand options.
 ```text
 usage: goal-cli run [-h] [--dry-run] [--max-minutes MAX_MINUTES]
 
-Run one heartbeat. The thing decides success; source changes are only a step.
+Run exactly one heartbeat: producer rebuild, tik review, then tok only if
+review fails.
 
 options:
   -h, --help            show this help message and exit
@@ -62,7 +63,7 @@ usage: goal-cli doctor [-h] [--smoke-codex-goal] [--smoke-codex-file-tik]
                        [--timeout-seconds TIMEOUT_SECONDS]
                        [--smoke-timeout-seconds SMOKE_TIMEOUT_SECONDS]
 
-Check whether goal-cli can rebuild and check the thing before launching a
+Check config, commands, providers, and smoke prerequisites before a real
 heartbeat.
 
 options:
@@ -86,8 +87,7 @@ options:
 ```text
 usage: goal-cli tik [-h]
 
-Rebuild THE THING and run tik only. The command does not complete the goal
-or change source files.
+Run producer plus tik against the configured artifact without source changes.
 
 options:
   -h, --help  show this help message and exit
@@ -101,8 +101,7 @@ one `goal-cli` heartbeat; it does not add multi-cycle behavior inside the CLI.
 ```text
 usage: goal-cli heartbeat [-h] {install,status,uninstall,paths,tick} ...
 
-Manage an OS-level timer that triggers exactly one goal-cli heartbeat per
-tick.
+Manage an OS-level timer that starts one hardened heartbeat tick per schedule.
 
 options:
   -h, --help            show this help message and exit
@@ -181,7 +180,7 @@ options:
 
 | Command | Effect |
 | --- | --- |
-| `goal-cli init` | Create a starter `goal.toml`; refuses to overwrite an existing config. |
+| `goal-cli init` | Create a starter artifact `goal.toml`; refuses to overwrite an existing config. |
 | `goal-cli validate` | Load config and print a JSON summary if config policy passes. |
 | `goal-cli doctor` | Run static readiness probes and optional Codex smoke checks. |
 | `goal-cli run` | Execute exactly one heartbeat. |
@@ -192,4 +191,4 @@ options:
 | `goal-cli state` | Print current state JSON or the default initial state. |
 | `goal-cli reset` | Remove state and lock files; preserve run artifacts. |
 | `goal-cli cleanup` | Clean stale/interrupted heartbeat state. |
-| `goal-cli render-prompts` | Render tik and tok prompts into a new run directory. |
+| `goal-cli render-prompts` | Render tik and tok prompts without running providers. |

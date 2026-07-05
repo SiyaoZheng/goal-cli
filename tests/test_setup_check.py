@@ -262,7 +262,6 @@ generated_dirs = ["output", "build"]
                     output_path.write_text(json.dumps({{
                         "source_change_possible": True,
                         "revision_strategy": "write temporary smoke file",
-                        "sources_changed": ["doctor-smoke.txt"],
                         "expected_artifact_visible_improvement": ["codex_goal can emit schema-shaped reports"],
                         "remaining_artifact_bottleneck": "none for setup smoke"
                     }}) + "\\n", encoding="utf-8")

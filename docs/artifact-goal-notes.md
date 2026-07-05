@@ -101,9 +101,10 @@ This means a goal is not:
 - A claim that the tok succeeded.
 
 The outer goal is artifact-level. Each tok pass is an internal Codex `/goal`.
-It treats itself as the last tok: read `tik.md`, edit only allowed sources,
-leave source ready for the next artifact to answer tik's blocking objections,
-write the schema report, and stop. Tok never completes the artifact-level goal.
+It treats itself as the last tok: read `tik.md`, make runtime-audited source
+changes, leave source ready for the next artifact to answer tik's blocking
+objections, write the schema report, and stop. Tok never completes the
+artifact-level goal.
 
 After the producer, the runtime has exactly two sequential roles:
 
@@ -127,7 +128,8 @@ After the producer, the runtime has exactly two sequential roles:
 7. Reject stale or unparseable tik output before tok.
 8. If the tik passes, run the completion gate and mark the goal complete.
 9. If the tik fails, launch one tok pass against validated source boundaries.
-10. Record the schema-checked tok report in files.
+10. Record the schema-checked tok report plus runtime source-diff evidence in
+    files.
 11. Gate successful source changes, then exit with file state ready for the
     next heartbeat.
 
@@ -142,8 +144,9 @@ from file state.
 ## Current Module Boundaries
 
 - Git Gate: `NoMistakesGate` is the only place that knows how to prepare a clean
-  Git checkpoint, move off a default branch, choose no-mistakes skip presets,
-  honor run budgets, and invoke `no-mistakes axi run`.
+  Git checkpoint, preserve the current mainline branch, choose no-mistakes skip
+  presets, honor run budgets, and invoke or skip `no-mistakes axi run` according
+  to branch constraints.
 - Heartbeat State: `HeartbeatRecorder` owns state/history/heartbeat writes
   and transition recording. The runner orchestrates producer, tik, and tok; it
   does not hand-edit heartbeat JSON.
@@ -184,6 +187,7 @@ Prefer terminal or blocked states such as:
 - `blocked_unparseable_tik`
 - `blocked_stale_tik_review`
 - `blocked_tok_failed`
+- `blocked_tok_no_source_changes`
 - `blocked_repeated_same_objection`
 - `blocked_no_source_change_possible`
 - `blocked_no_mistakes_failed`

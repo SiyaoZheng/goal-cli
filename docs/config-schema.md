@@ -139,11 +139,15 @@ codex_features = ["goals"]
 
 `codex_goal` launches `codex exec` with `/goal`, `--enable goals`, and the tok
 report schema. Tok treats every pass as the last pass: read `tik.md`, use the
-tik review as the standard to meet, edit only `write_dirs`, and leave source
-ready for the next artifact to answer the review's blocking objections.
-`write_dirs` must stay inside the project root and must not overlap `.git`,
-state directories, run directories, generated directories, or the canonical
-artifact.
+tik review as the standard to meet, edit source under `write_dirs`, and leave
+source ready for the next artifact to answer the review's blocking objections.
+`write_dirs` are the protocol and audit boundary for source edits, not a hard
+OS sandbox guarantee when `run_cwd` or trusted sandbox modes grant broader local
+authority. The runtime snapshots these directories before and after tok, records
+the actual changed paths, and blocks successful tok reports that make no source
+change. `write_dirs` must stay inside the project root and must not overlap
+`.git`, state directories, run directories, generated directories, or the
+canonical artifact.
 
 `run_cwd` controls the working directory passed to `codex exec -C`. It defaults
 to the first `write_dirs` entry for backward compatibility. Set it to `"."`
@@ -151,11 +155,14 @@ when the producer or diagnostics must be launched from the project root.
 
 `runtime_write_dirs` is intentionally separate from `write_dirs`. It grants the
 tok process access to directories that may be updated by commands it runs, such
-as `output`, `build`, or `logs`, without declaring those directories as manual
-source-edit scopes. Runtime write dirs may overlap generated directories and
-the artifact output directory, but they must stay inside the project root and
-must not be the project root, `.git`, the goal config, or goal state/run
-directories.
+as `output`, `build`, or `logs`, without declaring those directories as source
+edit scopes. Runtime write dirs may overlap generated directories and the
+artifact output directory, but they must stay inside the project root and must
+not be the project root, `.git`, the goal config, or goal state/run directories.
+The runtime records artifact provenance before and after tok in
+`tok_artifact_provenance.json`; the next producer pass records
+`producer_artifact_provenance.json` so the next producer/tik pass can be traced
+to a rebuilt artifact, not just a tok claim.
 
 Tok reports must match this JSON shape:
 
@@ -163,7 +170,6 @@ Tok reports must match this JSON shape:
 {
   "source_change_possible": true,
   "revision_strategy": "one sentence",
-  "sources_changed": ["path"],
   "expected_artifact_visible_improvement": ["visible change in next artifact"],
   "remaining_artifact_bottleneck": "one sentence"
 }
@@ -172,6 +178,9 @@ Tok reports must match this JSON shape:
 If no source change is possible, tok reports
 `"source_change_possible": false`; the runtime records
 `blocked_no_source_change_possible`.
+Tok does not report changed file paths. The runtime writes the local evidence to
+`tok_source_changes.json` and stores it in state as
+`last_tok.actual_sources_changed`.
 
 ## no-mistakes Gate
 
@@ -205,14 +214,20 @@ checkpoint_message = "goal-cli checkpoint: {goal_name} heartbeat {iteration} {ph
 - `checkpoint_message`: Git commit message template. Available placeholders are
   `{goal_name}`, `{iteration}`, and `{phase}`.
 
-When enabled, goal-cli prepares the repo before a non-dry-run heartbeat by ignoring
-`.goal/` in `.git/info/exclude` and checkpointing dirty project changes on the
-current branch. After successful tok and completion heartbeats, it
-checkpoints again, runs `no-mistakes init`, and then runs:
+When enabled, goal-cli prepares the repo before a non-dry-run heartbeat by
+ignoring `.goal/` in `.git/info/exclude` and checkpointing dirty project
+changes on the current branch. After successful tok and completion heartbeats,
+it checkpoints again. On non-default branches it then runs `no-mistakes init`
+and:
 
 ```bash
 no-mistakes axi run --intent "<configured or generated intent>" --yes [--skip ...]
 ```
+
+On default branches such as `main` or `master`, goal-cli keeps the
+single-person mainline branch, records `no_mistakes_default_branch_skipped`,
+and does not invoke `no-mistakes axi run`, because no-mistakes refuses to
+validate default branches and asks users to create a feature branch.
 
 Missing Git setup, a missing no-mistakes binary, or a failed gate records
 `blocked_no_mistakes_failed`.
@@ -321,6 +336,7 @@ provider evidence under `.goal/runs/`.
 | `blocked_stale_tik_review` | Tik reviewed a stale artifact hash or declared the review stale. |
 | `blocked_tok_failed` | The tok provider failed or returned an invalid schema report. |
 | `blocked_no_source_change_possible` | Tok reported that no source change is possible. |
+| `blocked_tok_no_source_changes` | Tok returned success but the runtime found no changes under `tok.write_dirs`. |
 | `blocked_repeated_same_objection` | The configured blocker fingerprint repeated too many times. |
 | `blocked_no_mistakes_failed` | Git setup, checkpointing, or no-mistakes gating failed. |
 | `budget_limited` | The heartbeat wall-clock budget expired during no-mistakes work. |
@@ -363,8 +379,8 @@ goal-cli doctor --smoke-codex-goal
 ```
 
 The smoke check starts a minimal internal Codex `/goal` in a temporary writable
-directory and validates the schema-shaped tok report. It does not touch
-project sources.
+directory, asks it to create a temporary source file, and validates the
+schema-shaped tok report. It does not touch project sources.
 
 For `tik.provider = "codex_file"`, also run:
 

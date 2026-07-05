@@ -10,12 +10,32 @@ Use this skill when a user wants an agent to make an existing project runnable
 under `goal-cli`, especially when the user can judge the finished thing but does
 not want to configure the build loop by hand.
 
+## Role in the One-Prompt Flow
+
+`llms.txt` is the public entrypoint and router. This skill is the execution
+runbook. When an agent arrives from `llms.txt`, inherit the user-facing contract
+from that file, then use this skill for the concrete setup decisions:
+
+- inspect the project;
+- choose the canonical artifact;
+- synthesize or select the producer;
+- write `goal.toml`;
+- validate the setup;
+- report the exact next command.
+
+Do not send the user back to read this skill. The skill is for the agent to
+execute on the user's behalf.
+
 The deliverable is not just a `goal.toml`. The deliverable is a repeatable
 thing loop:
 
 ```text
 stable rebuild -> finished thing -> review -> bounded source work
 ```
+
+For a non-expert user, success means they can run one command after setup and
+understand what artifact to inspect. Do not leave them with a partial config
+that only works if they already know the build system.
 
 ## When to Use
 
@@ -40,8 +60,52 @@ project that has no inspectable thing.
   agent's explanation.
 - Treat every tok pass as source changes only. Tok must not declare the
   thing-level goal complete.
+- If a command fails, preserve the exact failing command and the relevant output
+  in your final report. Do not describe a setup as ready when validation did not
+  pass.
+- Do not edit unrelated README/docs/tests/source while setting up goal-cli unless
+  that file is directly required for the producer or goal config.
 
 ## Workflow
+
+### 0. Verify goal-cli and Required Tools
+
+Start with a cheap command check:
+
+```bash
+goal-cli -h
+```
+
+If `goal-cli` is missing, verify Python 3.11+ and install from GitHub:
+
+```bash
+python3 --version
+python3 -m pip install --upgrade pip
+python3 -m pip install "goal-cli @ git+https://github.com/SiyaoZheng/goal-cli.git"
+```
+
+If `tik.provider = "agent"` will be used, install the OpenAI extra:
+
+```bash
+python3 -m pip install "goal-cli[openai] @ git+https://github.com/SiyaoZheng/goal-cli.git"
+```
+
+If you are inside a checked-out `goal-cli` repository, prefer the local checkout:
+
+```bash
+python3 -m pip install -e '.[openai]'
+```
+
+Verify the command again:
+
+```bash
+goal-cli -h
+```
+
+For a normal non-expert setup, do not disable the no-mistakes gate just to make
+the first real heartbeat easier. If `no-mistakes` is missing, either install it
+using the project installation docs or report it as the blocker before any real
+heartbeat.
 
 ### 1. Inspect the Project
 
@@ -85,6 +149,16 @@ Good artifacts are product-shaped and user-inspectable:
 If multiple candidates exist, prefer the one mentioned by the user, the one
 documented as final, or the one downstream of the broadest build command.
 
+Do not choose a stale output just because it already exists. The artifact must
+be reproducible by `[producer].command`. If several plausible artifacts remain,
+ask one short question that lists the candidates and then proceed from the
+answer.
+
+If the project does not yet have a final artifact, use the closest inspectable
+product-shaped target, such as a runnable demo, generated HTML report, metrics
+JSON, or a smoke report file. Avoid abstract goals like "improve the codebase"
+because they cannot be checked by tik.
+
 ### 3. Synthesize the Producer
 
 The producer is the command `goal-cli` will run on every heartbeat. It must
@@ -112,6 +186,7 @@ Producer wrapper requirements:
 - Verify the configured artifact exists at the end.
 - Print artifact path, size, modification time, and sha256 when available.
 - Exit non-zero if the artifact is missing or empty.
+- Keep command output short but useful for debugging.
 - Avoid network calls unless the project already requires them.
 - Do not mutate raw data or commit files.
 
@@ -146,6 +221,10 @@ Then set:
 [producer]
 command = "scripts/goal_producer.sh"
 ```
+
+Before writing `goal.toml`, run the producer once if it is safe. If it fails,
+fix the producer path or report the exact blocker instead of continuing with an
+untested command.
 
 ### 4. Configure Tik
 
@@ -191,9 +270,14 @@ JSON verdict that includes at least:
 }
 ```
 
+For non-expert setup, prefer deterministic checks when they clearly catch
+missing, empty, malformed, or stale artifacts. Use model review only for quality
+judgments that a script cannot express.
+
 ### 5. Configure Tok
 
-Tok changes source only. Keep `write_dirs` narrow and exclude generated output:
+Tok's successful changes must show up under source `write_dirs`. Keep that
+audited source scope narrow and exclude generated output:
 
 ```toml
 [tok]
@@ -210,11 +294,15 @@ Tok prompt template should say:
 - that `{tik_review_path}` is the standard to meet;
 - that tok must make source changes so the next rebuilt artifact answers the
   tik review's blocking objections;
-- which source directories are writable;
+- which source directories count as the audited source-change scope;
 - which outputs, data, logs, and generated files are off limits.
 
 Do not include language that asks a human to approve, clarify, or decide during
 the runtime loop.
+
+Set `run_cwd = "."` when the tok pass may need to run project-level commands.
+Use `runtime_write_dirs` for build outputs, logs, and generated artifacts that
+commands may refresh. Do not put those generated directories in `write_dirs`.
 
 ### 6. Write `goal.toml`
 
@@ -251,6 +339,8 @@ fingerprint_fields = ["blocking_objections"]
 provider = "codex_goal"
 sandbox = "workspace-write"
 write_dirs = ["src"]
+run_cwd = "."
+runtime_write_dirs = ["output", "build", "logs"]
 codex_features = ["goals"]
 
 [no_mistakes]
@@ -262,6 +352,12 @@ mode = "lightspeed"
 generated_dirs = ["output", "build", "dist"]
 max_blocker_repeats = 3
 ```
+
+Also include `[tik.prompt]` and `[tok.prompt]` sections. Use only placeholders
+documented in `docs/config-schema.md`, and keep runtime prompts closed-system:
+they may refer to the artifact, producer, tik ledger, source boundaries, and
+operational impossibilities, but not to asking a person for approval or
+clarification during the loop.
 
 ### 7. Validate Before Running
 
@@ -291,6 +387,9 @@ scripts/goal_producer.sh
 test -s path/to/artifact
 ```
 
+If the producer command is not a wrapper, run that exact configured command and
+then run `test -s` on `[artifact].path`.
+
 Run a dry prompt render before the first real heartbeat:
 
 ```bash
@@ -311,6 +410,23 @@ a foreground loop running:
 goal-cli heartbeat install --every-minutes 30 --max-minutes 30
 goal-cli heartbeat status
 ```
+
+### 8. Recovery Rules
+
+Use these rules when setup does not pass on the first attempt:
+
+- `goal-cli validate` fails: fix the config shape, placeholders, write scopes,
+  or forbidden runtime prompt language before any other check.
+- `goal-cli doctor` fails on a missing command: install the missing tool only
+  when that is clearly in scope; otherwise report the exact missing command.
+- producer fails: repair the producer command or wrapper first; do not proceed
+  to tik/tok.
+- artifact missing or empty: fix the producer or artifact path; do not lower the
+  standard.
+- Codex smoke checks fail: report the exact smoke check failure and leave the
+  next command as a setup repair command, not a heartbeat.
+- no-mistakes missing: install it or report it; do not silently set
+  `[no_mistakes].enabled = false` for a normal user setup.
 
 ## Common Recipes
 
@@ -345,7 +461,8 @@ goal-cli heartbeat status
 - The finished thing is named and exists after the producer runs.
 - The producer is a stable command or wrapper checked into the project.
 - `goal.toml` points at the producer and artifact.
-- `tok.write_dirs` are narrow source directories.
+- `tok.write_dirs` are narrow source directories and the runtime can audit source
+  changes there.
 - `safety.generated_dirs` protects build outputs.
 - `goal-cli validate` passes.
 - `goal-cli doctor` reports the configured static setup as ready or the
@@ -355,3 +472,5 @@ goal-cli heartbeat status
   verifier used, writable scopes, and exact next command. If unattended progress
   is appropriate, the next command should be `goal-cli heartbeat install ...`;
   otherwise it should be one manual `goal-cli run ...`.
+- If any required check failed, the final response starts with the blocker and
+  gives the smallest next command to fix it.

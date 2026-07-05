@@ -183,7 +183,7 @@ The setup file is `goal.toml`. It answers a few plain questions:
 | What finished output should I inspect? | `[artifact].path` |
 | How do I rebuild it? | `[producer].command` |
 | How should it be checked? | `[tik]` |
-| Where may the coding agent edit source files? | `[tok].write_dirs` |
+| Which source files count as valid tok edits? | `[tok].write_dirs` |
 | Where may runtime commands produce side effects? | `[tok].runtime_write_dirs` |
 
 You may see these short names in the config and deeper docs:
@@ -193,7 +193,7 @@ You may see these short names in the config and deeper docs:
 | `artifact` | The finished output you can inspect. |
 | `producer` | The command that rebuilds that output. |
 | `tik` | The reviewer that rejects weak output. |
-| `tok` | The coding agent that changes allowed source files. |
+| `tok` | The coding agent that changes source files under the audited source scope. |
 | `.goal/` | The folder where runs, reviews, and state are recorded. |
 
 Example:

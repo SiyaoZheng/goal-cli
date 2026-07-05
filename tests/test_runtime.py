@@ -123,6 +123,10 @@ class GoalRuntimeTests(unittest.TestCase):
             self.assertEqual(state["status"], "active")
             self.assertEqual(state["iteration"], 1)
             self.assertEqual(state["next_action"], "tik")
+            self.assertEqual(state["last_tok"]["actual_sources_changed"], ["src/source.txt"])
+            self.assertTrue((root / state["last_tok"]["source_changes_path"]).exists())
+            self.assertFalse(state["last_tok"]["artifact_provenance"]["artifact_changed_during_tok"])
+            first_reviewed_sha = state["last_tok"]["reviewed_artifact_sha256"]
             self.assertEqual((root / "output" / "artifact.txt").read_text(encoding="utf-8"), "draft\n")
             heartbeat = json.loads((root / ".goal" / "heartbeat.json").read_text(encoding="utf-8"))
             self.assertEqual(heartbeat["phase"], "tok_completed")
@@ -134,6 +138,8 @@ class GoalRuntimeTests(unittest.TestCase):
             state = load_state(config)
             self.assertEqual(state["status"], "complete")
             self.assertEqual(state["iteration"], 2)
+            self.assertEqual(state["last_producer"]["previous_tok_reviewed_artifact_sha256"], first_reviewed_sha)
+            self.assertTrue((root / state["last_producer"]["provenance_path"]).exists())
             self.assertEqual((root / "output" / "artifact.txt").read_text(encoding="utf-8"), "ready\n")
 
     def test_active_heartbeat_is_success_and_can_resume(self) -> None:
@@ -156,6 +162,42 @@ class GoalRuntimeTests(unittest.TestCase):
             self.assertEqual(second_result.exit_code, 0)
             self.assertEqual(second_result.status, "complete")
             self.assertEqual(load_state(config)["status"], "complete")
+
+    def test_tok_success_without_source_diff_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_basic_project(root)
+            self._write_tok_behavior(root, {"mode": "success_no_change"})
+
+            config = load_config(root / "goal.toml")
+            result = run_goal(config, RuntimeOptions(max_minutes=0))
+
+            self.assertEqual(result.exit_code, 1)
+            self.assertEqual(result.status, "blocked_tok_no_source_changes")
+            state = load_state(config)
+            self.assertEqual(state["status"], "blocked_tok_no_source_changes")
+            self.assertEqual(state["last_tok"]["actual_sources_changed"], [])
+            self.assertTrue((root / state["last_tok"]["source_changes_path"]).exists())
+
+    def test_tok_artifact_provenance_records_direct_artifact_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_basic_project(root)
+            self._write_tok_behavior(root, {"mode": "mutate_artifact"})
+
+            config = load_config(root / "goal.toml")
+            result = run_goal(config, RuntimeOptions(max_minutes=0))
+
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.status, "active")
+            state = load_state(config)
+            provenance = state["last_tok"]["artifact_provenance"]
+            self.assertTrue(provenance["artifact_changed_during_tok"])
+            self.assertNotEqual(
+                provenance["artifact_before_tok"]["sha256"],
+                provenance["artifact_after_tok"]["sha256"],
+            )
+            self.assertTrue((root / state["last_tok"]["artifact_provenance_path"]).exists())
 
     def test_successful_tok_clears_stale_blocked_reason(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -196,6 +238,19 @@ class GoalRuntimeTests(unittest.TestCase):
 
             self.assertTrue(any("project root" in issue for issue in issues), issues)
             self.assertTrue(any("overlaps protected path" in issue for issue in issues), issues)
+
+    def test_artifact_copy_as_must_be_plain_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_basic_project(root)
+            config_path = root / "goal.toml"
+            config_path.write_text(
+                config_path.read_text(encoding="utf-8").replace('copy_as = "artifact.txt"', 'copy_as = "../artifact.txt"'),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ConfigError):
+                load_config(config_path)
 
     def test_unparseable_tik_blocks_without_tok(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -344,7 +399,6 @@ class GoalRuntimeTests(unittest.TestCase):
                     output_path.write_text(json.dumps({
                         "source_change_possible": True,
                         "revision_strategy": "edit source",
-                        "sources_changed": ["src/source.txt"],
                         "expected_artifact_visible_improvement": ["artifact changes"],
                         "remaining_artifact_bottleneck": "none known"
                     }) + "\\n", encoding="utf-8")
@@ -405,7 +459,6 @@ class GoalRuntimeTests(unittest.TestCase):
                     output_path.write_text(json.dumps({
                         "source_change_possible": True,
                         "revision_strategy": "edit source",
-                        "sources_changed": ["src/source.txt"],
                         "expected_artifact_visible_improvement": ["artifact changes"],
                         "remaining_artifact_bottleneck": "none known"
                     }) + "\\n", encoding="utf-8")
@@ -880,16 +933,24 @@ max_blocker_repeats = 3
                     output_path.write_text(json.dumps({
                         "source_change_possible": False,
                         "revision_strategy": "no source change can address the verdict",
-                        "sources_changed": [],
                         "expected_artifact_visible_improvement": [],
                         "remaining_artifact_bottleneck": behavior["remaining_artifact_bottleneck"]
                     }) + "\\n", encoding="utf-8")
                     raise SystemExit(0)
+                if behavior["mode"] == "success_no_change":
+                    output_path.write_text(json.dumps({
+                        "source_change_possible": True,
+                        "revision_strategy": "no-op despite report",
+                        "expected_artifact_visible_improvement": ["artifact says ready"],
+                        "remaining_artifact_bottleneck": "none known"
+                    }) + "\\n", encoding="utf-8")
+                    raise SystemExit(0)
+                if behavior["mode"] == "mutate_artifact":
+                    (root / "output" / "artifact.txt").write_text("hand-edited artifact\\n", encoding="utf-8")
                 (root / "src" / "source.txt").write_text("ready\\n", encoding="utf-8")
                 output_path.write_text(json.dumps({
                     "source_change_possible": True,
                     "revision_strategy": "replace draft marker",
-                    "sources_changed": ["src/source.txt"],
                     "expected_artifact_visible_improvement": ["artifact says ready"],
                     "remaining_artifact_bottleneck": "none known"
                 }) + "\\n", encoding="utf-8")

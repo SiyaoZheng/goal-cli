@@ -100,18 +100,18 @@ max_blocker_repeats = 3
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="goal-cli",
-        description="Make agents finish THE THING.",
+        description="Configure and run artifact-centered heartbeats for coding agents.",
         epilog="Omitting the command defaults to run. Use 'goal-cli <command> -h' for subcommand options.",
     )
     parser.add_argument("-c", "--config", default="goal.toml", help="Path to goal.toml (default: goal.toml)")
     subparsers = parser.add_subparsers(dest="command", title="commands")
 
-    subparsers.add_parser("init", help="Create a starter goal.toml")
-    subparsers.add_parser("validate", help="Validate config, prompt placeholders, and writable scopes")
+    subparsers.add_parser("init", help="Create a starter artifact goal.toml")
+    subparsers.add_parser("validate", help="Validate goal.toml, prompt placeholders, and writable scopes")
     doctor_parser = subparsers.add_parser(
         "doctor",
-        help="Check whether the thing-centered setup is ready",
-        description="Check whether goal-cli can rebuild and check the thing before launching a heartbeat.",
+        help="Check setup readiness before a heartbeat",
+        description="Check config, commands, providers, and smoke prerequisites before a real heartbeat.",
     )
     doctor_parser.add_argument("--smoke-codex-goal", action="store_true", help="Run a minimal Codex /goal schema-output smoke check in a temp directory")
     doctor_parser.add_argument("--smoke-codex-file-tik", action="store_true", help="Run a minimal Codex local-file tik smoke check in a temp directory")
@@ -121,19 +121,19 @@ def main(argv: list[str] | None = None) -> int:
     run_parser = subparsers.add_parser(
         "run",
         help="Run one autonomous heartbeat",
-        description="Run one heartbeat. The thing decides success; source changes are only a step.",
+        description="Run exactly one heartbeat: producer rebuild, tik review, then tok only if review fails.",
     )
     run_parser.add_argument("--dry-run", action="store_true", help="Create a run directory and render prompts without running producer, tik, or tok")
     run_parser.add_argument("--max-minutes", type=float, default=30.0, help="Maximum wall-clock minutes for the heartbeat, including providers and no-mistakes")
     subparsers.add_parser(
         "tik",
-        help="Run producer plus tik review, but skip tok",
-        description="Rebuild THE THING and run tik only. The command does not complete the goal or change source files.",
+        help="Rebuild the artifact and run tik review, but skip tok",
+        description="Run producer plus tik against the configured artifact without source changes.",
     )
     heartbeat_parser = subparsers.add_parser(
         "heartbeat",
         help="Install or run the system-level heartbeat",
-        description="Manage an OS-level timer that triggers exactly one goal-cli heartbeat per tick.",
+        description="Manage an OS-level timer that starts one hardened heartbeat tick per schedule.",
     )
     heartbeat_subparsers = heartbeat_parser.add_subparsers(dest="heartbeat_command", title="heartbeat commands", required=True)
     heartbeat_install = heartbeat_subparsers.add_parser(
@@ -168,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Remove stale heartbeat locks, mark interrupted running phases, and optionally stop orphan provider processes for this project.",
     )
     cleanup_parser.add_argument("--kill-orphans", action="store_true", help="Terminate orphan goal-cli/Codex processes for this project when no live heartbeat lock exists")
-    subparsers.add_parser("render-prompts", help="Render tik and tok prompts into a new run directory")
+    subparsers.add_parser("render-prompts", help="Render tik and tok prompts without running providers")
 
     args = parser.parse_args(argv)
     command = args.command or "run"

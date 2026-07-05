@@ -40,6 +40,7 @@ class NoMistakesIntegrationTests(unittest.TestCase):
             self._install_fake_no_mistakes(root, fake_log)
             config = load_config(self._write_project(root, disable_observability=True))
             self._git(root, "init")
+            self._git(root, "switch", "-c", "work")
             starting_branch = self._git(root, "branch", "--show-current").stdout.strip()
 
             result = run_heartbeat(config, RuntimeOptions(max_minutes=0), adapters=RevisionAdapters())
@@ -68,6 +69,30 @@ class NoMistakesIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(events[-1]["git_status"], "")
 
+    def test_heartbeat_skips_no_mistakes_axi_run_on_default_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            fake_log = root / ".goal" / "fake-no-mistakes.jsonl"
+            self._install_fake_no_mistakes(root, fake_log)
+            config = load_config(self._write_project(root, disable_observability=True))
+            self._git(root, "init")
+            self._git(root, "symbolic-ref", "HEAD", "refs/heads/master")
+
+            result = run_heartbeat(config, RuntimeOptions(max_minutes=0), adapters=RevisionAdapters())
+
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.status, "active")
+            self.assertEqual(self._git(root, "branch", "--show-current").stdout.strip(), "master")
+            self.assertEqual(self._git(root, "status", "--porcelain=v1", "--untracked-files=all").stdout.strip(), "")
+            state = load_state(config)
+            self.assertEqual(state["last_no_mistakes"]["status"], "no_mistakes_default_branch_skipped")
+            self.assertTrue(state["last_no_mistakes"]["skipped"])
+            self.assertEqual(state["last_no_mistakes"]["branch"], "master")
+            self.assertIsNotNone(state["last_no_mistakes"]["commit"])
+            self.assertFalse(fake_log.exists())
+            log_path = root / state["last_no_mistakes"]["log_path"]
+            self.assertIn("skipped on the default branch", log_path.read_text(encoding="utf-8"))
+
     def test_lightspeed_mode_pre_skips_high_latency_no_mistakes_steps(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -81,6 +106,7 @@ class NoMistakesIntegrationTests(unittest.TestCase):
                 )
             )
             self._git(root, "init")
+            self._git(root, "switch", "-c", "work")
 
             result = run_heartbeat(config, RuntimeOptions(max_minutes=0), adapters=RevisionAdapters())
 
@@ -101,6 +127,7 @@ class NoMistakesIntegrationTests(unittest.TestCase):
             self._install_fake_no_mistakes(root, fake_log, axi_sleep_seconds=5.0, child_marker=child_marker)
             config = load_config(self._write_project(root, disable_observability=True))
             self._git(root, "init")
+            self._git(root, "switch", "-c", "work")
 
             started = time.monotonic()
             result = run_heartbeat(config, RuntimeOptions(max_minutes=0.005), adapters=RevisionAdapters())
@@ -140,6 +167,7 @@ class NoMistakesIntegrationTests(unittest.TestCase):
             self._install_fake_no_mistakes(root, fake_log, axi_sleep_seconds=5.0)
             config = load_config(self._write_project(root, disable_observability=True))
             self._git(root, "init")
+            self._git(root, "switch", "-c", "work")
 
             result = run_goal(config, RuntimeOptions(max_minutes=0.005), adapters=RevisionAdapters())
 
@@ -338,7 +366,6 @@ class RevisionAdapters:
         report = {
             "source_change_possible": True,
             "revision_strategy": "replace draft marker",
-            "sources_changed": ["src/source.txt"],
             "expected_artifact_visible_improvement": ["artifact says ready"],
             "remaining_artifact_bottleneck": "none known",
         }

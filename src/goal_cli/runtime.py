@@ -323,6 +323,8 @@ class HeartbeatRunner:
 
     def _run_producer(self) -> RunResult | None:
         run_dir = self._run_dir()
+        artifact_before = artifact_snapshot(self.config)
+        self.state["last_producer"] = producer_state(self.config, run_dir, artifact_before, self.state.get("last_tok"))
         self._heartbeat("producer_running", run_dir)
         with self.telemetry.span(
             "goal_cli.producer",
@@ -377,6 +379,15 @@ class HeartbeatRunner:
                 },
             )
         self.state["last_artifact"] = artifact
+        last_producer = self.state.get("last_producer")
+        if isinstance(last_producer, dict) and last_producer.get("run_dir") == rel(self.config, self._run_dir()):
+            before = last_producer.get("artifact_before_producer")
+            before_sha = before.get("sha256") if isinstance(before, dict) else None
+            last_producer["artifact_after_producer"] = {**artifact, "exists": True}
+            last_producer["artifact_hash_changed_by_producer"] = before_sha != artifact.get("sha256")
+            provenance_path = self._run_dir() / "producer_artifact_provenance.json"
+            last_producer["provenance_path"] = rel(self.config, provenance_path)
+            provenance_path.write_text(json.dumps(last_producer, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return artifact
 
     def _run_tik(self, artifact: dict[str, Any]) -> tuple[dict[str, Any], Path, Path, Path] | RunResult:
@@ -495,6 +506,8 @@ class HeartbeatRunner:
     def _run_tok(self, artifact: dict[str, Any], tik_path: Path) -> RunResult:
         run_dir = self._run_dir()
         tok_prompt = render_tok_prompt(self.config, artifact, tik_path, run_dir)
+        source_before = snapshot_file_scope(self.config, self.config.tok.write_dirs)
+        artifact_before_tok = artifact_snapshot(self.config)
         self._heartbeat("tok_running", run_dir)
         with self.telemetry.span(
             "goal_cli.tok",
@@ -512,6 +525,14 @@ class HeartbeatRunner:
         ) as span:
             outcome = self.adapters.execute_tok(self.config, tok_prompt, run_dir, timeout_seconds=remaining_seconds(self.deadline))
             tok_report_path = outcome.report_path
+            source_after = snapshot_file_scope(self.config, self.config.tok.write_dirs)
+            source_changes = source_change_summary(self.config, source_before, source_after, self.config.tok.write_dirs)
+            artifact_after_tok = artifact_snapshot(self.config)
+            artifact_provenance = tok_artifact_provenance(self.config, artifact_before_tok, artifact_after_tok)
+            source_changes_path = run_dir / "tok_source_changes.json"
+            artifact_provenance_path = run_dir / "tok_artifact_provenance.json"
+            source_changes_path.write_text(json.dumps(source_changes, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            artifact_provenance_path.write_text(json.dumps(artifact_provenance, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             if not outcome.ok or tok_report_path is None or outcome.report is None:
                 set_span_attributes(
                     span,
@@ -519,7 +540,19 @@ class HeartbeatRunner:
                         "goal.tok.ok": False,
                         "goal.tok.report_path": rel(self.config, tok_report_path) if tok_report_path else None,
                         "goal.tok.error": outcome.detail,
+                        "goal.tok.local_source_change_count": len(source_changes["changed_paths"]),
                     },
+                )
+                self.state["last_tok_attempt"] = tok_attempt_state(
+                    self.config,
+                    run_dir,
+                    tok_report_path,
+                    artifact,
+                    source_changes_path,
+                    source_changes,
+                    artifact_provenance_path,
+                    artifact_provenance,
+                    outcome.detail,
                 )
                 return self._finish(
                     1,
@@ -539,10 +572,22 @@ class HeartbeatRunner:
                     "goal.tok.ok": True,
                     "goal.tok.report_path": rel(self.config, tok_report_path),
                     "goal.tok.source_change_possible": tok_report.get("source_change_possible"),
-                    "goal.tok.sources_changed": tok_report.get("sources_changed", []),
+                    "goal.tok.local_source_change_count": len(source_changes["changed_paths"]),
+                    "goal.tok.local_sources_changed": source_changes["changed_paths"],
+                    "goal.tok.artifact_changed_during_tok": artifact_provenance["artifact_changed_during_tok"],
                 },
             )
-            self.state["last_tok"] = tok_state(self.config, run_dir, tok_report_path, artifact, tok_report)
+            self.state["last_tok"] = tok_state(
+                self.config,
+                run_dir,
+                tok_report_path,
+                artifact,
+                tok_report,
+                source_changes_path,
+                source_changes,
+                artifact_provenance_path,
+                artifact_provenance,
+            )
             if tok_report.get("source_change_possible") is False:
                 return self._finish(
                     1,
@@ -551,6 +596,17 @@ class HeartbeatRunner:
                     phase="blocked_no_source_change_possible",
                     event="blocked_no_source_change_possible",
                     blocked_reason=str(tok_report.get("remaining_artifact_bottleneck") or "tok reported no source change possible"),
+                    next_action=None,
+                    artifact=artifact,
+                )
+            if not source_changes["changed_paths"]:
+                return self._finish(
+                    1,
+                    "blocked_tok_no_source_changes",
+                    "tok completed without changing configured source files",
+                    phase="blocked_tok_no_source_changes",
+                    event="blocked_tok_no_source_changes",
+                    blocked_reason="tok completed without changing configured source files",
                     next_action=None,
                     artifact=artifact,
                 )
@@ -1122,12 +1178,76 @@ def artifact_metadata(config: GoalConfig, path: Path) -> dict[str, Any]:
     }
 
 
+def artifact_snapshot(config: GoalConfig) -> dict[str, Any]:
+    path = config.artifact.path
+    if not path.exists():
+        return {"path": rel(config, path), "exists": False}
+    return {**artifact_metadata(config, path), "exists": True}
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as input_file:
         for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def snapshot_file_scope(config: GoalConfig, scopes: tuple[Path, ...]) -> dict[str, dict[str, Any]]:
+    snapshot: dict[str, dict[str, Any]] = {}
+    for scope in scopes:
+        if not scope.exists():
+            continue
+        paths = [scope] if scope.is_file() else sorted(scope.rglob("*"))
+        for path in paths:
+            if not path.is_file():
+                continue
+            stat = path.stat()
+            snapshot[rel(config, path)] = {
+                "sha256": sha256_file(path),
+                "size_bytes": stat.st_size,
+                "mtime": dt.datetime.fromtimestamp(stat.st_mtime, dt.UTC).replace(microsecond=0).isoformat(),
+            }
+    return snapshot
+
+
+def source_change_summary(
+    config: GoalConfig,
+    before: dict[str, dict[str, Any]],
+    after: dict[str, dict[str, Any]],
+    scopes: tuple[Path, ...],
+) -> dict[str, Any]:
+    before_paths = set(before)
+    after_paths = set(after)
+    added = sorted(after_paths - before_paths)
+    deleted = sorted(before_paths - after_paths)
+    modified = sorted(path for path in before_paths & after_paths if before[path].get("sha256") != after[path].get("sha256"))
+    files: list[dict[str, Any]] = []
+    for path in added:
+        files.append({"path": path, "change": "added", "after": after[path]})
+    for path in modified:
+        files.append({"path": path, "change": "modified", "before": before[path], "after": after[path]})
+    for path in deleted:
+        files.append({"path": path, "change": "deleted", "before": before[path]})
+    changed_paths = sorted(added + modified + deleted)
+    return {
+        "scopes": [rel(config, scope) for scope in scopes],
+        "changed_paths": changed_paths,
+        "added": added,
+        "modified": modified,
+        "deleted": deleted,
+        "files": files,
+    }
+
+
+def tok_artifact_provenance(config: GoalConfig, before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    before_sha = before.get("sha256") if before.get("exists") else None
+    after_sha = after.get("sha256") if after.get("exists") else None
+    return {
+        "artifact_before_tok": before,
+        "artifact_after_tok": after,
+        "artifact_changed_during_tok": before.get("exists") != after.get("exists") or before_sha != after_sha,
+    }
 
 
 def tik_state(config: GoalConfig, run_dir: Path, memo_path: Path, verdict_path: Path, tik_path: Path, artifact: dict[str, Any], ready: bool) -> dict[str, Any]:
@@ -1141,15 +1261,68 @@ def tik_state(config: GoalConfig, run_dir: Path, memo_path: Path, verdict_path: 
     }
 
 
-def tok_state(config: GoalConfig, run_dir: Path, report_path: Path, artifact: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
+def producer_state(config: GoalConfig, run_dir: Path, artifact_before: dict[str, Any], previous_tok: object) -> dict[str, Any]:
+    state: dict[str, Any] = {
+        "run_dir": rel(config, run_dir),
+        "artifact_before_producer": artifact_before,
+    }
+    if isinstance(previous_tok, dict):
+        provenance = previous_tok.get("artifact_provenance")
+        if isinstance(provenance, dict):
+            after_tok = provenance.get("artifact_after_tok")
+            state["previous_tok_artifact_after_sha256"] = after_tok.get("sha256") if isinstance(after_tok, dict) else None
+            state["previous_tok_artifact_changed_during_tok"] = provenance.get("artifact_changed_during_tok")
+        state["previous_tok_reviewed_artifact_sha256"] = previous_tok.get("reviewed_artifact_sha256")
+    return state
+
+
+def tok_state(
+    config: GoalConfig,
+    run_dir: Path,
+    report_path: Path,
+    artifact: dict[str, Any],
+    report: dict[str, Any],
+    source_changes_path: Path,
+    source_changes: dict[str, Any],
+    artifact_provenance_path: Path,
+    artifact_provenance: dict[str, Any],
+) -> dict[str, Any]:
     return {
         "run_dir": rel(config, run_dir),
         "report_path": rel(config, report_path),
         "reviewed_artifact_sha256": artifact["sha256"],
         "source_change_possible": report.get("source_change_possible"),
-        "sources_changed": report.get("sources_changed", []),
+        "source_changes_path": rel(config, source_changes_path),
+        "source_changes": source_changes,
+        "actual_sources_changed": source_changes["changed_paths"],
+        "artifact_provenance_path": rel(config, artifact_provenance_path),
+        "artifact_provenance": artifact_provenance,
         "expected_artifact_visible_improvement": report.get("expected_artifact_visible_improvement", []),
         "remaining_artifact_bottleneck": report.get("remaining_artifact_bottleneck", ""),
+    }
+
+
+def tok_attempt_state(
+    config: GoalConfig,
+    run_dir: Path,
+    report_path: Path | None,
+    artifact: dict[str, Any],
+    source_changes_path: Path,
+    source_changes: dict[str, Any],
+    artifact_provenance_path: Path,
+    artifact_provenance: dict[str, Any],
+    error: str,
+) -> dict[str, Any]:
+    return {
+        "run_dir": rel(config, run_dir),
+        "report_path": rel(config, report_path) if report_path else None,
+        "reviewed_artifact_sha256": artifact["sha256"],
+        "source_changes_path": rel(config, source_changes_path),
+        "source_changes": source_changes,
+        "actual_sources_changed": source_changes["changed_paths"],
+        "artifact_provenance_path": rel(config, artifact_provenance_path),
+        "artifact_provenance": artifact_provenance,
+        "error": error,
     }
 
 

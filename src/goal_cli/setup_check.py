@@ -163,7 +163,7 @@ class LocalSetupProbeAdapter:
             prompt = (
                 "Doctor smoke check for goal-cli setup readiness.\n"
                 "Create doctor-smoke.txt in the current temporary writable directory, then return a JSON tok report with "
-                "source_change_possible true, sources_changed [\"doctor-smoke.txt\"], and a concise remaining_artifact_bottleneck.\n"
+                "source_change_possible true and a concise remaining_artifact_bottleneck.\n"
             )
             result = execute_tok(smoke_config, prompt, run_dir, timeout_seconds=options.smoke_timeout_seconds)
             if not result.ok:

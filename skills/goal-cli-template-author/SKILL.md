@@ -10,6 +10,10 @@ Use this skill when maintaining reusable `goal-cli` setup material rather than
 configuring one user's project. The audience is future agents and advanced
 users who need a reliable recipe for a project family.
 
+Do not use this skill to connect an ordinary target project to `goal-cli`. For
+that job, use `goal-cli-project-setup`. This skill only maintains the reusable
+material that `llms.txt` and `goal-cli-project-setup` point agents toward.
+
 Template work includes:
 
 - new example `goal.toml` files;
@@ -25,9 +29,15 @@ Template work includes:
   artifact shape.
 - Producer first. A template is incomplete unless it explains how the artifact
   is rebuilt from source.
-- Tik and tok stay separated. Tik reviews the artifact; tok edits source.
+- Tik and tok stay separated. Tik reviews the artifact; tok success is measured
+  by runtime-audited source changes.
 - Defaults should be safe for non-experts: narrow write scopes, protected
   generated dirs, dry-run validation before real heartbeats.
+- One-prompt setup material must be usable by an agent that has never seen the
+  target project and by a user who cannot debug `goal.toml` by hand.
+- Templates must include install/verification steps and a failure path for
+  missing commands, failed producers, missing artifacts, and failed doctor
+  checks.
 - Deterministic checks beat model review when they can reject failures clearly.
 - Examples should be runnable from a clean checkout or should state exactly
   which target project files they expect.
@@ -84,7 +94,7 @@ stored API responses.
 
 Every template must include:
 
-- recommended `write_dirs`;
+- recommended audited source `write_dirs`;
 - generated dirs to protect;
 - source dirs that look tempting but should stay read-only;
 - a tok prompt template that references `{tik_review_path}` as the standard to
@@ -183,6 +193,9 @@ Before finishing template work, verify:
 - frontmatter `name`, `description`, and `version` are present for every skill;
 - docs link to new skills from README or `docs/skills.md`;
 - `llms.txt` lists the current agent entrypoints;
+- one-prompt setup docs explain how to install or verify `goal-cli`;
+- non-expert setup docs include exact validation commands and recovery behavior
+  when those commands fail;
 - no template tells tok to edit generated outputs;
 - no runtime prompt asks a human to approve or clarify during the loop;
 - examples use current public config fields from `docs/config-schema.md`;

@@ -19,8 +19,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 0)
         help_text = output.getvalue()
         self.assertNotIn("--max-cycles", help_text)
-        self.assertIn("The thing decides success", help_text)
-        self.assertIn("source changes are only a step", help_text)
+        self.assertIn("Run exactly one heartbeat", help_text)
+        self.assertIn("producer rebuild, tik review", help_text)
+        self.assertIn("review fails", help_text)
         self.assertIn("Maximum wall-clock minutes for the heartbeat", help_text)
         self.assertIn("including providers and no-mistakes", help_text)
 
@@ -53,7 +54,7 @@ class CliTests(unittest.TestCase):
         help_text = output.getvalue()
         self.assertNotIn("cycle", help_text)
         self.assertIn("Omitting the command defaults to run", help_text)
-        self.assertIn("Validate config, prompt placeholders, and writable", help_text)
+        self.assertIn("Validate goal.toml, prompt placeholders, and writable", help_text)
 
     def test_doctor_help_exposes_separate_smoke_timeout(self) -> None:
         output = io.StringIO()

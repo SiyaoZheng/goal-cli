@@ -1,44 +1,159 @@
 # goal-cli
 
-`goal-cli` keeps the user's thing in the center.
+Set up this project so future coding-agent work is judged by a rebuilt,
+inspectable artifact, not by a summary of source edits.
 
-The user does not mainly care that an agent changed code. The user cares that
-the thing they asked for is actually better: a PDF, website, slide deck, report,
-chart pack, workbook, benchmark, app demo, or another result they can inspect.
+THE THING is the finished result the user will inspect: a PDF, website, slide
+deck, report, chart pack, workbook, benchmark, app demo, or another concrete
+output.
 
-Set up this project for goal-cli.
+Your job is to leave the user with a working `goal.toml`, a reliable rebuild
+command, and a clear next command. The user should not need to understand
+`goal-cli` internals to get a first safe setup.
 
-THE THING is the finished result the user will inspect.
+## Division of Labor
 
-If the user already named it, use that.
+This file is the public one-prompt entrypoint. Use it to bootstrap the task,
+choose the correct skill, and preserve the non-expert setup contract.
 
-If not, infer it from the project.
+`skills/goal-cli-project-setup/SKILL.md` is the detailed execution runbook for
+connecting a real project to `goal-cli`. If that skill is available, read it
+completely and follow it for inspection, artifact choice, producer synthesis,
+`goal.toml`, validation, and recovery.
 
-Ask one question only if you cannot infer it safely.
+`skills/goal-cli-template-author/SKILL.md` is only for maintaining reusable
+goal-cli templates, examples, docs, or skills in the `goal-cli` repository. Do
+not use it for an ordinary user's project setup.
 
-Make future coding work prove THE THING is getting better.
+The sections below are the minimum contract and fallback path when the project
+setup skill is unavailable. When the skill is available, use these sections as
+scope guardrails, not as a competing checklist.
 
-If `goal-cli` is missing, install it from
-https://github.com/SiyaoZheng/goal-cli with Python 3.11+.
+## Non-Negotiables
 
-Use `skills/goal-cli-project-setup/SKILL.md` if it is available.
+- Use live project evidence over README claims.
+- If the user already named THE THING, use that artifact.
+- If THE THING is not clear, infer it from the project.
+- Ask exactly one short question only if you cannot infer the artifact safely.
+- Do not edit raw data, generated outputs, build products, `.git/`, or `.goal/`.
+- Do not edit unrelated docs, READMEs, tests, or source files unless required
+  for the setup and clearly within scope.
+- Keep future repair write access narrow; generated outputs are not source
+  write scopes.
+- Do not run a real heartbeat until validation and dry-run checks pass.
 
-Find the output file or runnable demo I can inspect. Create or update goal.toml
-and any small rebuild script needed. Do not edit raw data, generated files,
-.git/, or .goal/. Keep future write access narrow.
+## Install Or Verify goal-cli
 
-Run:
+First check:
 
+```bash
+goal-cli -h
+```
+
+If the command is missing, verify Python 3.11+ and install from GitHub:
+
+```bash
+python3 --version
+python3 -m pip install --upgrade pip
+python3 -m pip install "goal-cli @ git+https://github.com/SiyaoZheng/goal-cli.git"
+```
+
+If `tik.provider = "agent"` will be used, install with the OpenAI extra:
+
+```bash
+python3 -m pip install "goal-cli[openai] @ git+https://github.com/SiyaoZheng/goal-cli.git"
+```
+
+If you are already inside a `goal-cli` checkout, use the local checkout instead:
+
+```bash
+python3 -m pip install -e '.[openai]'
+```
+
+Verify again:
+
+```bash
+goal-cli -h
+```
+
+## Fallback Setup Flow
+
+1. Inspect the project root and current Git state.
+2. Identify one canonical artifact path for THE THING.
+3. Find an existing command that rebuilds it, or create a small producer
+   wrapper such as `scripts/goal_producer.sh`.
+4. Make the producer fail non-zero when the artifact is missing or empty.
+5. Create or update `goal.toml`.
+6. Choose the smallest useful tik:
+   - deterministic `oracle` when a script can reject bad output;
+   - `codex_file` when Codex can review a local artifact file;
+   - `agent` only when OpenAI file upload is intended and credentials exist.
+7. Configure `tok` with narrow source `write_dirs` as the audited source-change
+   scope, `run_cwd = "."` when useful, and generated `runtime_write_dirs` only
+   for command side effects.
+8. Put generated output folders in `[safety].generated_dirs`.
+
+## Required Checks
+
+Run these before any real heartbeat:
+
+```bash
 goal-cli validate
 goal-cli doctor
+```
+
+If using Codex tok:
+
+```bash
+goal-cli doctor --smoke-codex-goal
+```
+
+If using `tik.provider = "codex_file"`:
+
+```bash
+goal-cli doctor --smoke-codex-goal --smoke-codex-file-tik
+```
+
+Run the producer directly and prove the artifact exists:
+
+```bash
+scripts/goal_producer.sh
+test -s path/to/artifact
+```
+
+Then render prompts without changing source:
+
+```bash
 goal-cli run --dry-run
+```
 
-After checks pass, recommend one timed heartbeat every 30 minutes:
+Only after those checks pass, recommend one manual heartbeat:
 
+```bash
+goal-cli run --max-minutes 30
+```
+
+For unattended progress, recommend a timed heartbeat instead:
+
+```bash
 goal-cli heartbeat install --every-minutes 30 --max-minutes 30
+goal-cli heartbeat status
+```
 
-Report the output path, rebuild command, editable folders, protected folders,
-whether to schedule the heartbeat, and the next command.
+## Final Report
+
+End by reporting:
+
+- artifact path;
+- producer command;
+- tik provider and any remaining blocker;
+- tok editable folders;
+- protected generated folders;
+- validation commands run and their result;
+- the exact next command for the user.
+
+If setup cannot be completed, do not pretend it is ready. Report the exact
+blocking command and output, then give the smallest next action.
 
 ## Agent Entry Points
 
@@ -58,7 +173,7 @@ whether to schedule the heartbeat, and the next command.
 ## Examples
 
 - [PDF-first example](examples/scientificity/goal.toml): Research-paper setup
-  where the thing is the rebuilt PDF.
+  where THE THING is the rebuilt PDF.
 
 ## Optional
 
