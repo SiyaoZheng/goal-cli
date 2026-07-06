@@ -13,12 +13,7 @@ from .template import template_placeholders
 
 TERMINAL_STATUSES = {
     "complete",
-    "blocked_unparseable_tik",
-    "blocked_repeated_same_objection",
-    "blocked_no_source_change_possible",
-    "blocked_tok_no_source_changes",
-    "blocked_tok_direct_artifact_mutation",
-    "blocked_tok_unexpected_mutation",
+    "blocked_invalid_review_evidence",
 }
 
 NO_MISTAKES_SKIP_STEPS = {

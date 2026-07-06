@@ -133,13 +133,15 @@ class NoMistakesIntegrationTests(unittest.TestCase):
             result = run_heartbeat(config, RuntimeOptions(max_minutes=0.005), adapters=RevisionAdapters())
             elapsed = time.monotonic() - started
 
-            self.assertEqual(result.exit_code, 1)
-            self.assertEqual(result.status, "budget_limited")
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.status, "active")
             self.assertLess(elapsed, 2.0)
-            self.assertRegex(result.message, r"timed out|run budget exhausted")
+            self.assertEqual(result.message, "tok completed; next heartbeat must rebuild and run tik")
             state = load_state(config)
-            self.assertEqual(state["status"], "budget_limited")
+            self.assertEqual(state["status"], "active")
+            self.assertEqual(state["next_action"], "tik")
             self.assertEqual(state["last_no_mistakes"]["status"], "no_mistakes_budget_exhausted")
+            self.assertIn("no_mistakes_gate_failed_ignored", [entry["event"] for entry in state["history"]])
             time.sleep(1.0)
             self.assertFalse(child_marker.exists())
 
@@ -153,14 +155,15 @@ class NoMistakesIntegrationTests(unittest.TestCase):
 
             result = run_heartbeat(config, RuntimeOptions(max_minutes=0), deadline=time.monotonic() - 1, adapters=RevisionAdapters())
 
-            self.assertEqual(result.exit_code, 1)
-            self.assertEqual(result.status, "budget_limited")
-            self.assertIn("run budget exhausted", result.message)
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.status, "active")
             state = load_state(config)
-            self.assertEqual(state["status"], "budget_limited")
+            self.assertEqual(state["status"], "active")
+            self.assertEqual(state["next_action"], "tik")
             self.assertEqual(state["last_no_mistakes"]["status"], "no_mistakes_budget_exhausted")
+            self.assertEqual(state["history"][0]["event"], "no_mistakes_prepare_failed_ignored")
 
-    def test_run_goal_preserves_no_mistakes_budget_heartbeat(self) -> None:
+    def test_run_goal_ignores_no_mistakes_budget_as_goal_gate(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             fake_log = root / ".goal" / "fake-no-mistakes.jsonl"
@@ -171,11 +174,11 @@ class NoMistakesIntegrationTests(unittest.TestCase):
 
             result = run_goal(config, RuntimeOptions(max_minutes=0.005), adapters=RevisionAdapters())
 
-            self.assertEqual(result.status, "budget_limited")
+            self.assertEqual(result.status, "active")
             heartbeat = json.loads(config.heartbeat_path.read_text(encoding="utf-8"))
-            self.assertEqual(heartbeat["phase"], "run_budget_exhausted")
+            self.assertEqual(heartbeat["phase"], "tok_completed")
 
-    def test_no_mistakes_prepare_records_granular_non_git_status(self) -> None:
+    def test_no_mistakes_prepare_failure_is_recorded_but_not_a_gate(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             fake_log = root / ".goal" / "fake-no-mistakes.jsonl"
@@ -184,9 +187,11 @@ class NoMistakesIntegrationTests(unittest.TestCase):
 
             result = run_heartbeat(config, RuntimeOptions(max_minutes=0), adapters=RevisionAdapters())
 
-            self.assertEqual(result.exit_code, 1)
-            self.assertEqual(result.status, "blocked_no_mistakes_failed")
-            self.assertEqual(load_state(config)["last_no_mistakes"]["status"], "no_mistakes_no_git_repository")
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.status, "active")
+            state = load_state(config)
+            self.assertEqual(state["last_no_mistakes"]["status"], "no_mistakes_no_git_repository")
+            self.assertEqual(state["history"][0]["event"], "no_mistakes_prepare_failed_ignored")
 
     def test_git_diff_cached_timeout_is_classified_as_budget_exhaustion(self) -> None:
         result = subprocess.CompletedProcess(

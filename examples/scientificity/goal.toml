@@ -1,5 +1,6 @@
 name = "scientificity-publication-pdf"
-# Copy this file to the scientificity repository root before running goal-cli.
+# Copy this example's goal.toml, scripts/, and docs/ into the scientificity
+# repository root before running goal-cli.
 state_dir = ".goal"
 runs_dir = ".goal/runs"
 
@@ -11,10 +12,19 @@ copy_as = "full_paper.pdf"
 command = "make all"
 
 [tik]
-provider = "codex_file"
 timeout_seconds = 1800
 max_file_size_bytes = 25000000
 max_output_tokens = 4096
+
+[[tik.providers]]
+label = "apsr-review"
+provider = "codex_file"
+
+[[tik.providers]]
+label = "checklist"
+provider = "checklist"
+command = "python3 scripts/goal_tik_ai4ss_autochecklist_review.py"
+timeout_seconds = 7200
 
 [tik.verdict]
 ready_field = "artifact_ready"
@@ -58,17 +68,7 @@ codex_features = ["goals"]
 [tok.prompt]
 template = """
 Make the editable source yield, via `{producer_command}`, a manuscript PDF that
-meets the APSR standard defined by the referee report at {tik_review_path};
-success means that PDF answers every blocking objection in that report.
-
-Manual edits are limited to:
-{writable_scopes}
-
-Commands may run from {tok_run_cwd}; generated side effects may update:
-{runtime_writable_scopes}
-
-Do not hand-edit data/, scripts/, generated outputs, .goal/, or the manuscript
-PDF.
+meets the APSR standards. Your work should adress the concerns raised in {tik_review_path}.
 """
 
 [no_mistakes]
@@ -77,11 +77,12 @@ binary = "no-mistakes"
 skip_steps = []
 intent = """
 Drive one fully automatic scientificity publication-PDF heartbeat: rebuild the
-current PDF, run a fresh PDF-only referee review through goal-cli, apply source
-changes through the manuscript/code entries writing/ and src/, use data/ as
-read-only project input unless a narrower safe data subdirectory is explicitly
-configured, run the workflow freely so generated artifacts can refresh, keep the
-Git worktree clean between heartbeats, and gate the checkpoint with no-mistakes.
+current PDF, run fresh PDF-only referee and DP16276 checklist tik reviews
+through goal-cli, apply source changes through the manuscript/code entries
+writing/ and src/, use data/ as read-only project input unless a narrower safe
+data subdirectory is explicitly configured, run the workflow freely so generated
+artifacts can refresh, keep the Git worktree clean between heartbeats, and gate
+the checkpoint with no-mistakes.
 """
 
 [observability]

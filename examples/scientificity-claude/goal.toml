@@ -60,17 +60,7 @@ runtime_write_dirs = ["output", "build", "logs"]
 [tok.prompt]
 template = """
 Make the editable source yield, via `{producer_command}`, a manuscript PDF that
-meets the APSR standard defined by the referee report at {tik_review_path};
-success means that PDF answers every blocking objection in that report.
-
-Manual edits are limited to:
-{writable_scopes}
-
-Commands may run from {tok_run_cwd}; generated side effects may update:
-{runtime_writable_scopes}
-
-Do not hand-edit data/, scripts/, generated outputs, .goal/, or the manuscript
-PDF.
+meets the APSR standards. Your work should adress the concerns raised in {tik_review_path}.
 """
 
 [no_mistakes]

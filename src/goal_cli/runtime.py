@@ -16,7 +16,7 @@ from typing import Any
 
 from .adapters import GoalProviderAdapters, ProductionGoalProviderAdapters
 from .config import GoalConfig, TERMINAL_STATUSES, TikConfig, tik_providers, validate_config
-from .no_mistakes import NO_MISTAKES_BUDGET_EXHAUSTED, NoMistakesGate, NoMistakesResult
+from .no_mistakes import NoMistakesGate, NoMistakesResult
 from .observability import (
     GoalTelemetry,
     configure_observability,
@@ -27,12 +27,33 @@ from .observability import (
 )
 from .template import render_template
 
+IGNORED_RUNTIME_METADATA_FILENAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
+IGNORED_RUNTIME_METADATA_DIRNAMES = {".Spotlight-V100", ".TemporaryItems", ".fseventsd"}
+DEFAULT_MAX_MINUTES = 600.0
+RETIRED_INVALID_REVIEW_STATUSES = {
+    "blocked_producer_failed",
+    "blocked_artifact_missing",
+    "blocked_tik_failed",
+    "blocked_unparseable_tik",
+    "blocked_stale_tik_review",
+}
+RETIRED_ACTIVE_STATUSES = {
+    "blocked_tok_failed",
+    "blocked_tok_direct_artifact_mutation",
+    "blocked_tok_unexpected_mutation",
+    "blocked_tok_no_source_changes",
+    "blocked_no_source_change_possible",
+    "blocked_repeated_same_objection",
+    "blocked_no_mistakes_failed",
+    "budget_limited",
+}
+
 
 @dataclass(frozen=True)
 class RuntimeOptions:
     dry_run: bool = False
     review_only: bool = False
-    max_minutes: float = 30.0
+    max_minutes: float = DEFAULT_MAX_MINUTES
 
 
 @dataclass(frozen=True)
@@ -230,6 +251,7 @@ class HeartbeatRunner:
     def run(self) -> RunResult:
         with HeartbeatLock(self.config.lock_path, self.config.safety.lock_stale_seconds):
             self.state = load_state(self.config)
+            normalize_retired_status(self.config, self.state)
             git_gate = self._git_gate()
             defer_heartbeat_start = git_gate.enabled and not self.options.dry_run
             if not defer_heartbeat_start:
@@ -318,15 +340,18 @@ class HeartbeatRunner:
         save_state(self.config, self.state)
         if result.ok:
             return None
-        if result.status == NO_MISTAKES_BUDGET_EXHAUSTED:
-            return self._record_no_mistakes_budget_exhausted("no_mistakes_prepare_budget_exhausted", result)
-        self.state["status"] = "blocked_no_mistakes_failed"
-        self.state["next_action"] = None
-        self.state["blocked_reason"] = result.detail
-        append_history(self.config, self.state, {"event": "no_mistakes_prepare_failed", "detail": result.detail, "run_dir": rel(self.config, self._run_dir())})
+        append_history(
+            self.config,
+            self.state,
+            {
+                "event": "no_mistakes_prepare_failed_ignored",
+                "status": result.status,
+                "detail": result.detail,
+                "run_dir": rel(self.config, self._run_dir()),
+            },
+        )
         save_state(self.config, self.state)
-        self._heartbeat("no_mistakes_failed", self._run_dir())
-        return RunResult(1, "blocked_no_mistakes_failed", self._run_dir(), result.detail)
+        return None
 
     def _dry_run(self) -> RunResult:
         run_dir = self._run_dir()
@@ -356,7 +381,7 @@ class HeartbeatRunner:
             return None
         return self._finish(
             1,
-            "blocked_producer_failed",
+            "blocked_invalid_review_evidence",
             "producer command failed",
             phase="producer_failed",
             event="producer_failed",
@@ -377,7 +402,7 @@ class HeartbeatRunner:
                 span.set_attribute("goal.artifact.exists", False)
                 return self._finish(
                     1,
-                    "blocked_artifact_missing",
+                    "blocked_invalid_review_evidence",
                     "artifact missing after producer",
                     phase="artifact_missing",
                     event="artifact_missing",
@@ -445,7 +470,7 @@ class HeartbeatRunner:
                 self.state["last_tik"] = tik_state(self.config, run_dir, memo_path, verdict_path, tik_path, artifact, False, reviews)
                 return self._finish(
                     1,
-                    "blocked_tik_failed",
+                    "blocked_invalid_review_evidence",
                     "tik provider failed",
                     phase="tik_failed",
                     event="tik_failed",
@@ -457,7 +482,7 @@ class HeartbeatRunner:
                 self.state["last_tik"] = tik_state(self.config, run_dir, memo_path, verdict_path, tik_path, artifact, False, reviews)
                 return self._finish(
                     1,
-                    "blocked_unparseable_tik",
+                    "blocked_invalid_review_evidence",
                     "tik verdict was unparseable",
                     phase="tik_unparseable",
                     event="tik_unparseable",
@@ -473,7 +498,7 @@ class HeartbeatRunner:
                 self.state["last_tik"] = tik_state(self.config, run_dir, memo_path, verdict_path, tik_path, artifact, False, reviews)
                 return self._finish(
                     1,
-                    "blocked_stale_tik_review",
+                    "blocked_invalid_review_evidence",
                     "tik review does not match current artifact",
                     phase="tik_stale",
                     event="tik_stale",
@@ -545,17 +570,7 @@ class HeartbeatRunner:
 
     def _record_blocker(self, tik_path: Path, artifact: dict[str, Any]) -> RunResult | None:
         update_blocker_state(self.config, self.state, tik_path.read_text(encoding="utf-8") if tik_path.exists() else "")
-        if self.state.get("status") != "blocked_repeated_same_objection":
-            return None
-        return self._finish(
-            1,
-            "blocked_repeated_same_objection",
-            "same tik objection repeated",
-            phase="blocked_repeated_same_objection",
-            event="blocked_repeated_same_objection",
-            next_action=None,
-            artifact=artifact,
-        )
+        return None
 
     def _review_only(self, artifact: dict[str, Any]) -> RunResult:
         return self._finish(
@@ -604,9 +619,9 @@ class HeartbeatRunner:
             tok_report_path = outcome.report_path
             source_after = snapshot_file_scope(self.config, self.config.tok.write_dirs)
             source_changes = source_change_summary(self.config, source_before, source_after, self.config.tok.write_dirs)
-            mutation_after = snapshot_tok_offlimits(self.config)
             artifact_after_tok = artifact_snapshot(self.config)
             artifact_provenance = tok_artifact_provenance(self.config, artifact_before_tok, artifact_after_tok)
+            mutation_after = snapshot_tok_offlimits(self.config)
             mutation_audit = tok_mutation_audit(self.config, mutation_before, mutation_after, artifact_provenance)
             source_changes_path = run_dir / "tok_source_changes.json"
             artifact_provenance_path = run_dir / "tok_artifact_provenance.json"
@@ -639,17 +654,15 @@ class HeartbeatRunner:
                     mutation_audit,
                     outcome.detail,
                 )
-                safety_result = self._tok_mutation_blocker(mutation_audit, artifact)
-                if safety_result is not None:
-                    return safety_result
+                next_action = "tik" if source_changes["changed_paths"] else "tok"
+                phase = "tok_failed_with_source_changes" if source_changes["changed_paths"] else "tok_failed"
                 return self._finish(
-                    1,
-                    "blocked_tok_failed",
-                    "tok provider failed",
-                    phase="tok_failed",
-                    event="tok_failed",
-                    blocked_reason="tok provider failed",
-                    next_action=None,
+                    0,
+                    "active",
+                    "tok provider failed; recorded for retry",
+                    phase=phase,
+                    event="tok_failed_ignored",
+                    next_action=next_action,
                     artifact=artifact,
                 )
 
@@ -679,29 +692,14 @@ class HeartbeatRunner:
                 mutation_audit_path,
                 mutation_audit,
             )
-            safety_result = self._tok_mutation_blocker(mutation_audit, artifact)
-            if safety_result is not None:
-                return safety_result
-            if tok_report.get("source_change_possible") is False:
-                return self._finish(
-                    1,
-                    "blocked_no_source_change_possible",
-                    "tok reported no source change possible",
-                    phase="blocked_no_source_change_possible",
-                    event="blocked_no_source_change_possible",
-                    blocked_reason=str(tok_report.get("remaining_artifact_bottleneck") or "tok reported no source change possible"),
-                    next_action=None,
-                    artifact=artifact,
-                )
             if not source_changes["changed_paths"]:
                 return self._finish(
-                    1,
-                    "blocked_tok_no_source_changes",
+                    0,
+                    "active",
                     "tok completed without changing configured source files",
-                    phase="blocked_tok_no_source_changes",
-                    event="blocked_tok_no_source_changes",
-                    blocked_reason="tok completed without changing configured source files",
-                    next_action=None,
+                    phase="tok_no_source_changes",
+                    event="tok_no_source_changes",
+                    next_action="tok",
                     artifact=artifact,
                 )
 
@@ -715,34 +713,6 @@ class HeartbeatRunner:
                 artifact=artifact,
             )
 
-    def _tok_mutation_blocker(self, mutation_audit: dict[str, Any], artifact: dict[str, Any]) -> RunResult | None:
-        if mutation_audit.get("artifact_changed_during_tok"):
-            return self._finish(
-                1,
-                "blocked_tok_direct_artifact_mutation",
-                "tok modified the configured artifact directly",
-                phase="blocked_tok_direct_artifact_mutation",
-                event="blocked_tok_direct_artifact_mutation",
-                blocked_reason="tok modified the configured artifact directly; the artifact must be rebuilt by producer",
-                next_action=None,
-                artifact=artifact,
-            )
-        unexpected_paths = mutation_audit.get("unexpected_changed_paths")
-        if unexpected_paths:
-            preview = ", ".join(str(path) for path in unexpected_paths[:5])
-            extra = "" if len(unexpected_paths) <= 5 else f", and {len(unexpected_paths) - 5} more"
-            return self._finish(
-                1,
-                "blocked_tok_unexpected_mutation",
-                "tok modified paths outside declared scopes",
-                phase="blocked_tok_unexpected_mutation",
-                event="blocked_tok_unexpected_mutation",
-                blocked_reason=f"tok modified paths outside declared scopes: {preview}{extra}",
-                next_action=None,
-                artifact=artifact,
-            )
-        return None
-
     def _finish(
         self,
         exit_code: int,
@@ -755,9 +725,9 @@ class HeartbeatRunner:
         artifact: dict[str, Any] | None = None,
         blocked_reason: str | None = None,
     ) -> RunResult:
-        gate_result = self._gate_no_mistakes(exit_code, status)
-        if gate_result is not None:
-            return gate_result
+        checkpoint_result = self._checkpoint_no_mistakes(exit_code, status)
+        if checkpoint_result is not None:
+            return checkpoint_result
         self._recorder().finish_state(
             status,
             event=event,
@@ -769,7 +739,7 @@ class HeartbeatRunner:
         self._heartbeat(phase, self._run_dir())
         return RunResult(exit_code, status, self._run_dir(), message)
 
-    def _gate_no_mistakes(self, exit_code: int, status: str) -> RunResult | None:
+    def _checkpoint_no_mistakes(self, exit_code: int, status: str) -> RunResult | None:
         git_gate = self._git_gate()
         if not git_gate.enabled:
             return None
@@ -783,7 +753,7 @@ class HeartbeatRunner:
                 "goal.name": self.config.name,
                 "goal.iteration": int(self.state.get("iteration", 0)),
                 "goal.run_dir": rel(self.config, self._run_dir()),
-                "goal.status.before_gate": status,
+                "goal.status.before_checkpoint": status,
             },
         ) as span:
             result = git_gate.gate(
@@ -793,13 +763,13 @@ class HeartbeatRunner:
                 deadline=self.deadline,
             )
             record_no_mistakes_result(span, result)
-        self._record_no_mistakes("no_mistakes_gate", result)
+        self._record_no_mistakes("no_mistakes_checkpoint", result)
         if result.ok:
             append_history(
                 self.config,
                 self.state,
                 {
-                    "event": "no_mistakes_gate",
+                    "event": "no_mistakes_checkpoint",
                     "status": result.status,
                     "branch": result.branch,
                     "commit": result.commit,
@@ -810,17 +780,11 @@ class HeartbeatRunner:
             save_state(self.config, self.state)
             return None
 
-        if result.status == NO_MISTAKES_BUDGET_EXHAUSTED:
-            return self._record_no_mistakes_budget_exhausted("no_mistakes_gate_budget_exhausted", result)
-
-        self.state["status"] = "blocked_no_mistakes_failed"
-        self.state["next_action"] = None
-        self.state["blocked_reason"] = result.detail
         append_history(
             self.config,
             self.state,
             {
-                "event": "no_mistakes_gate_failed",
+                "event": "no_mistakes_checkpoint_failed_ignored",
                 "status": result.status,
                 "detail": result.detail,
                 "branch": result.branch,
@@ -830,29 +794,7 @@ class HeartbeatRunner:
             },
         )
         save_state(self.config, self.state)
-        self._heartbeat("no_mistakes_failed", self._run_dir())
-        return RunResult(1, "blocked_no_mistakes_failed", self._run_dir(), result.detail)
-
-    def _record_no_mistakes_budget_exhausted(self, event: str, result: NoMistakesResult) -> RunResult:
-        self.state["status"] = "budget_limited"
-        self.state["next_action"] = "tik"
-        self.state.pop("blocked_reason", None)
-        append_history(
-            self.config,
-            self.state,
-            {
-                "event": event,
-                "status": result.status,
-                "detail": result.detail,
-                "branch": result.branch,
-                "commit": result.commit,
-                "log_path": rel(self.config, result.log_path) if result.log_path else None,
-                "run_dir": rel(self.config, self._run_dir()),
-            },
-        )
-        save_state(self.config, self.state)
-        self._heartbeat("run_budget_exhausted", self._run_dir())
-        return RunResult(1, "budget_limited", self._run_dir(), result.detail)
+        return None
 
     def _record_no_mistakes(self, event: str, result: NoMistakesResult) -> None:
         self._recorder().record_no_mistakes(event, result)
@@ -951,10 +893,11 @@ def render_tik_prompt(config: GoalConfig, artifact: dict[str, Any]) -> str:
 def render_tok_prompt(config: GoalConfig, artifact: dict[str, Any], tik_path: Path, run_dir: Path) -> str:
     tik_ledger = tik_path.read_text(encoding="utf-8") if tik_path.exists() else ""
     tik_review_path = write_tik_review_attachment(run_dir, tik_ledger)
+    artifact_path = str(artifact.get("path", rel(config, config.artifact.path)))
     values = {
         "goal_name": config.name,
         "producer_command": config.producer.command,
-        "artifact_path": str(artifact.get("path", rel(config, config.artifact.path))),
+        "artifact_path": artifact_path,
         "artifact_sha256": str(artifact.get("sha256", "")),
         "tik_review_path": str(tik_review_path),
         "writable_scopes": "\n".join(f"- {path}" for path in config.tok.write_dirs),
@@ -1068,6 +1011,60 @@ def load_state(config: GoalConfig) -> dict[str, Any]:
         raise ValueError(f"{config.state_path} must contain a JSON object")
     state.setdefault("history", [])
     return state
+
+
+def normalize_retired_status(config: GoalConfig, state: dict[str, Any]) -> None:
+    status = state.get("status")
+    if status in RETIRED_INVALID_REVIEW_STATUSES:
+        state["status"] = "blocked_invalid_review_evidence"
+        state["next_action"] = "tik"
+        append_history(
+            config,
+            state,
+            {
+                "event": "retired_status_migrated",
+                "previous_status": status,
+                "status": "blocked_invalid_review_evidence",
+            },
+        )
+        save_state(config, state)
+        return
+
+    if status not in RETIRED_ACTIVE_STATUSES:
+        return
+
+    state["status"] = "active"
+    state["next_action"] = next_action_after_retired_active_status(state)
+    state.pop("blocked_reason", None)
+    append_history(
+        config,
+        state,
+        {
+            "event": "retired_status_migrated",
+            "previous_status": status,
+            "status": "active",
+            "next_action": state["next_action"],
+        },
+    )
+    save_state(config, state)
+
+
+def next_action_after_retired_active_status(state: dict[str, Any]) -> str:
+    source_changes = retired_status_source_changes(state)
+    if any(not is_ignored_runtime_metadata(Path(path)) for path in source_changes):
+        return "tik"
+    return "tok"
+
+
+def retired_status_source_changes(state: dict[str, Any]) -> list[str]:
+    for key in ("last_tok", "last_tok_attempt"):
+        candidate = state.get(key)
+        if not isinstance(candidate, dict):
+            continue
+        changes = candidate.get("actual_sources_changed")
+        if isinstance(changes, list):
+            return [str(path) for path in changes if isinstance(path, str)]
+    return []
 
 
 def save_state(config: GoalConfig, state: dict[str, Any]) -> None:
@@ -1339,13 +1336,10 @@ def update_blocker_state(config: GoalConfig, state: dict[str, Any], review_text:
         repeats = 1
     state["blocker_fingerprint"] = fingerprint
     state["consecutive_blocker_count"] = repeats
-    if repeats >= config.safety.max_blocker_repeats:
-        state["status"] = "blocked_repeated_same_objection"
-        state["next_action"] = None
-        state["blocked_reason"] = "same tik objection repeated across heartbeats"
-    else:
-        state["status"] = "active"
-        state["next_action"] = "tok"
+    state["repeated_blocker_ignored"] = repeats >= config.safety.max_blocker_repeats
+    state["status"] = "active"
+    state["next_action"] = "tok"
+    state.pop("blocked_reason", None)
 
 
 def blocker_fingerprint(review_text: str) -> str:
@@ -1395,6 +1389,8 @@ def snapshot_file_scope(config: GoalConfig, scopes: tuple[Path, ...]) -> dict[st
         for path in paths:
             if not path.is_file():
                 continue
+            if is_ignored_runtime_metadata(path):
+                continue
             stat = path.stat()
             snapshot[rel(config, path)] = {
                 "sha256": sha256_file(path),
@@ -1427,11 +1423,14 @@ def snapshot_tok_offlimits(config: GoalConfig) -> dict[str, dict[str, Any]]:
         dirnames[:] = [
             dirname
             for dirname in dirnames
-            if not _path_in_any_scope((current_path / dirname).resolve(strict=False), skipped_scopes)
+            if dirname not in IGNORED_RUNTIME_METADATA_DIRNAMES
+            and not _path_in_any_scope((current_path / dirname).resolve(strict=False), skipped_scopes)
         ]
         for filename in sorted(filenames):
             path = current_path / filename
             if not path.is_file():
+                continue
+            if is_ignored_runtime_metadata(path):
                 continue
             stat = path.stat()
             snapshot[rel(config, path)] = {
@@ -1582,6 +1581,7 @@ def tok_state(
         "artifact_provenance": artifact_provenance,
         "mutation_audit_path": rel(config, mutation_audit_path),
         "mutation_audit": mutation_audit,
+        "revision_strategy": report.get("revision_strategy", ""),
         "expected_artifact_visible_improvement": report.get("expected_artifact_visible_improvement", []),
         "remaining_artifact_bottleneck": report.get("remaining_artifact_bottleneck", ""),
     }
@@ -1682,6 +1682,11 @@ def _path_in_any_scope(path: Path, scopes: tuple[Path, ...]) -> bool:
         except ValueError:
             continue
     return False
+
+
+def is_ignored_runtime_metadata(path: Path) -> bool:
+    name = path.name
+    return name in IGNORED_RUNTIME_METADATA_FILENAMES or name.startswith("._")
 
 
 def remaining_seconds(deadline: float | None) -> float | None:

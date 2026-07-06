@@ -190,8 +190,7 @@ def _tok_goal_smoke(config: GoalConfig, options: DoctorOptions, provider: str) -
         )
         prompt = (
             "Doctor smoke check for goal-cli setup readiness.\n"
-            "Create doctor-smoke.txt in the current temporary writable directory, then return a JSON tok report with "
-            "source_change_possible true and a concise remaining_artifact_bottleneck.\n"
+            "Create doctor-smoke.txt in the current temporary writable directory.\n"
         )
         result = execute_tok(smoke_config, prompt, run_dir, timeout_seconds=options.smoke_timeout_seconds)
         if not result.ok:
@@ -201,8 +200,8 @@ def _tok_goal_smoke(config: GoalConfig, options: DoctorOptions, provider: str) -
             return ProbeResult(False, detail)
         created_file = write_dir / "doctor-smoke.txt"
         if not created_file.exists():
-            return ProbeResult(False, f"{provider} smoke returned a valid tok report but did not create the temporary smoke artifact")
-        return ProbeResult(True, f"{provider} smoke produced a schema-valid tok report and temporary source change")
+            return ProbeResult(False, f"{provider} smoke completed but did not create the temporary smoke artifact")
+        return ProbeResult(True, f"{provider} smoke completed and created a temporary source change")
 
 
 def _local_file_tik_smoke(config: GoalConfig, options: DoctorOptions, provider: str) -> ProbeResult:
@@ -515,7 +514,7 @@ def _codex_capability_checks(config: GoalConfig, options: DoctorOptions, probes:
         checks.append(_check("codex.exec.help", help_result.returncode == 0, "codex exec --help succeeded", "codex exec --help failed"))
         required_flags: list[str] = []
         if config.tok.provider == "codex_goal":
-            required_flags.extend(["--output-schema", "--output-last-message", "--enable", "--add-dir", "--sandbox", "--skip-git-repo-check"])
+            required_flags.extend(["--enable", "--add-dir", "--sandbox", "--skip-git-repo-check"])
         if "codex_file" in tik_provider_types(config.tik):
             for flag in ("--output-last-message", "--sandbox", "--skip-git-repo-check", "--ephemeral"):
                 if flag not in required_flags:
@@ -566,7 +565,7 @@ def _claude_code_capability_checks(config: GoalConfig, options: DoctorOptions, p
     checks = [_check("claude.help", help_result.returncode == 0, "claude --help succeeded", "claude --help failed")]
     required_flags = ["--print", "--output-format", "--disallowedTools", "--model"]
     if config.tok.provider == "claude_code_goal":
-        required_flags.extend(["--json-schema", "--add-dir", "--permission-mode"])
+        required_flags.extend(["--add-dir", "--permission-mode"])
     for flag in required_flags:
         checks.append(_check(f"claude.{flag}", flag in help_text, f"claude supports {flag}", f"claude help does not show {flag}"))
     return checks

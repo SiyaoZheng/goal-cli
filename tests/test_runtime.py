@@ -12,11 +12,15 @@ from unittest import mock
 
 from goal_cli.adapters import api_tik_client_options, build_api_tik_prompt, effective_api_tik_model, run_tik
 from goal_cli.config import DEFAULT_API_TIK_BASE_URL, DEFAULT_API_TIK_MODEL, ConfigError, TikConfig, TokConfig, load_config, validate_config
-from goal_cli.runtime import HeartbeatLock, RuntimeOptions, cleanup_runtime, load_state, run_heartbeat, run_goal
-from goal_cli.tok_execution import TOK_REPORT_SCHEMA, build_claude_code_goal_tok_plan, build_codex_app_server_tok_plan, build_codex_goal_tok_plan, execute_tok
+from goal_cli.runtime import DEFAULT_MAX_MINUTES, HeartbeatLock, RuntimeOptions, cleanup_runtime, load_state, run_heartbeat, run_goal
+from goal_cli.tok_execution import build_claude_code_goal_tok_plan, build_codex_app_server_tok_plan, build_codex_goal_tok_plan, execute_tok
 
 
 class GoalRuntimeTests(unittest.TestCase):
+    def test_runtime_options_default_to_ten_hour_budget(self) -> None:
+        self.assertEqual(RuntimeOptions().max_minutes, DEFAULT_MAX_MINUTES)
+        self.assertEqual(DEFAULT_MAX_MINUTES, 600.0)
+
     def test_heartbeat_lock_recovers_dead_pid_before_stale_age(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             lock_path = Path(temp_dir) / ".goal" / ".heartbeat.lock"
@@ -164,6 +168,43 @@ class GoalRuntimeTests(unittest.TestCase):
             self.assertEqual(second_result.status, "complete")
             self.assertEqual(load_state(config)["status"], "complete")
 
+    def test_retired_tok_blocked_status_resumes_as_active(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_basic_project(root)
+            self._write_tok_behavior(root, {"mode": "success_no_change"})
+            config = load_config(root / "goal.toml")
+            config.state_dir.mkdir(parents=True)
+            config.state_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "goal": config.name,
+                        "status": "blocked_tok_unexpected_mutation",
+                        "iteration": 0,
+                        "created_at": "2026-07-04T00:00:00+00:00",
+                        "updated_at": "2026-07-04T00:00:00+00:00",
+                        "next_action": None,
+                        "blocked_reason": "tok modified paths outside declared scopes: .DS_Store",
+                        "history": [],
+                        "last_tok_attempt": {"actual_sources_changed": ["src/.DS_Store"]},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = run_goal(config, RuntimeOptions(max_minutes=0))
+
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.status, "active")
+            state = load_state(config)
+            self.assertEqual(state["status"], "active")
+            self.assertEqual(state["next_action"], "tok")
+            self.assertNotIn("blocked_reason", state)
+            self.assertEqual(state["history"][0]["event"], "retired_status_migrated")
+            self.assertEqual(state["history"][0]["previous_status"], "blocked_tok_unexpected_mutation")
+
     def test_multiple_tik_providers_run_in_parallel_and_tok_receives_aggregate_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -260,7 +301,7 @@ class GoalRuntimeTests(unittest.TestCase):
             self.assertEqual(state["last_tik"]["providers"][1]["provider"], "checklist")
             self.assertEqual(state["last_tok"]["actual_sources_changed"], ["src/source.txt"])
 
-    def test_tok_success_without_source_diff_blocks(self) -> None:
+    def test_tok_success_without_source_diff_is_not_a_gate(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             self._write_basic_project(root)
@@ -269,14 +310,16 @@ class GoalRuntimeTests(unittest.TestCase):
             config = load_config(root / "goal.toml")
             result = run_goal(config, RuntimeOptions(max_minutes=0))
 
-            self.assertEqual(result.exit_code, 1)
-            self.assertEqual(result.status, "blocked_tok_no_source_changes")
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.status, "active")
             state = load_state(config)
-            self.assertEqual(state["status"], "blocked_tok_no_source_changes")
+            self.assertEqual(state["status"], "active")
+            self.assertEqual(state["next_action"], "tok")
+            self.assertEqual(state["history"][-1]["event"], "tok_no_source_changes")
             self.assertEqual(state["last_tok"]["actual_sources_changed"], [])
             self.assertTrue((root / state["last_tok"]["source_changes_path"]).exists())
 
-    def test_tok_direct_artifact_mutation_blocks(self) -> None:
+    def test_tok_artifact_mutation_is_observed_not_restored_by_goal_cli(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             self._write_basic_project(root)
@@ -285,10 +328,11 @@ class GoalRuntimeTests(unittest.TestCase):
             config = load_config(root / "goal.toml")
             result = run_goal(config, RuntimeOptions(max_minutes=0))
 
-            self.assertEqual(result.exit_code, 1)
-            self.assertEqual(result.status, "blocked_tok_direct_artifact_mutation")
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.status, "active")
             state = load_state(config)
-            self.assertEqual(state["status"], "blocked_tok_direct_artifact_mutation")
+            self.assertEqual(state["status"], "active")
+            self.assertEqual(state["next_action"], "tik")
             provenance = state["last_tok"]["artifact_provenance"]
             self.assertTrue(provenance["artifact_changed_during_tok"])
             self.assertNotEqual(
@@ -298,8 +342,17 @@ class GoalRuntimeTests(unittest.TestCase):
             self.assertTrue((root / state["last_tok"]["artifact_provenance_path"]).exists())
             self.assertTrue((root / state["last_tok"]["mutation_audit_path"]).exists())
             self.assertEqual(state["last_tok"]["mutation_audit"]["artifact_changed_during_tok"], True)
+            self.assertNotIn("artifact_restored_after_tok", state["last_tok"]["mutation_audit"])
+            self.assertNotIn("artifact_restoration", provenance)
+            self.assertEqual((root / "output" / "artifact.txt").read_text(encoding="utf-8"), "hand-edited artifact\n")
 
-    def test_tok_generated_mutation_without_runtime_scope_blocks(self) -> None:
+            second_result = run_goal(config, RuntimeOptions(max_minutes=0))
+
+            self.assertEqual(second_result.exit_code, 0)
+            self.assertEqual(second_result.status, "complete")
+            self.assertEqual((root / "output" / "artifact.txt").read_text(encoding="utf-8"), "ready\n")
+
+    def test_tok_generated_mutation_without_runtime_scope_is_observed_not_gated(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             self._write_basic_project(root)
@@ -308,14 +361,32 @@ class GoalRuntimeTests(unittest.TestCase):
             config = load_config(root / "goal.toml")
             result = run_goal(config, RuntimeOptions(max_minutes=0))
 
-            self.assertEqual(result.exit_code, 1)
-            self.assertEqual(result.status, "blocked_tok_unexpected_mutation")
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.status, "active")
             state = load_state(config)
-            self.assertEqual(state["status"], "blocked_tok_unexpected_mutation")
+            self.assertEqual(state["status"], "active")
+            self.assertEqual(state["next_action"], "tik")
             audit = state["last_tok"]["mutation_audit"]
             self.assertIn("output/tok-side-effect.txt", audit["unexpected_changed_paths"])
             self.assertIn("output/tok-side-effect.txt", audit["protected_changed_paths"])
             self.assertEqual(state["last_tok"]["actual_sources_changed"], ["src/source.txt"])
+
+    def test_tok_metadata_mutations_are_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_basic_project(root)
+            self._write_tok_behavior(root, {"mode": "metadata_only"})
+
+            config = load_config(root / "goal.toml")
+            result = run_goal(config, RuntimeOptions(max_minutes=0))
+
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.status, "active")
+            state = load_state(config)
+            self.assertEqual(state["next_action"], "tok")
+            self.assertEqual(state["history"][-1]["event"], "tok_no_source_changes")
+            self.assertEqual(state["last_tok"]["actual_sources_changed"], [])
+            self.assertEqual(state["last_tok"]["mutation_audit"]["unexpected_changed_paths"], [])
 
     def test_tok_declared_runtime_write_dir_can_change_generated_output(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -404,7 +475,7 @@ class GoalRuntimeTests(unittest.TestCase):
             result = run_goal(config, RuntimeOptions(max_minutes=0))
 
             self.assertEqual(result.exit_code, 1)
-            self.assertEqual(result.status, "blocked_unparseable_tik")
+            self.assertEqual(result.status, "blocked_invalid_review_evidence")
             self.assertEqual((root / "src" / "source.txt").read_text(encoding="utf-8"), "draft\n")
 
     def test_stale_tik_review_blocks_without_tok(self) -> None:
@@ -431,9 +502,9 @@ class GoalRuntimeTests(unittest.TestCase):
             result = run_goal(config, RuntimeOptions(max_minutes=0))
 
             self.assertEqual(result.exit_code, 1)
-            self.assertEqual(result.status, "blocked_stale_tik_review")
+            self.assertEqual(result.status, "blocked_invalid_review_evidence")
             state = load_state(config)
-            self.assertEqual(state["status"], "blocked_stale_tik_review")
+            self.assertEqual(state["status"], "blocked_invalid_review_evidence")
             self.assertEqual(state["next_action"], "tik")
             self.assertIn("fresh artifact review", state["blocked_reason"])
             self.assertEqual((root / "src" / "source.txt").read_text(encoding="utf-8"), "draft\n")
@@ -456,6 +527,25 @@ class GoalRuntimeTests(unittest.TestCase):
             self.assertNotIn("consecutive_blocker_count", state)
             self.assertNotIn("blocker_fingerprint", state)
 
+    def test_repeated_blocker_is_observed_but_not_a_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_basic_project(root)
+            self._write_tok_behavior(root, {"mode": "success_no_change"})
+            config = load_config(root / "goal.toml")
+
+            for _ in range(3):
+                result = run_heartbeat(config, RuntimeOptions(max_minutes=0))
+
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.status, "active")
+            state = load_state(config)
+            self.assertEqual(state["status"], "active")
+            self.assertEqual(state["next_action"], "tok")
+            self.assertEqual(state["consecutive_blocker_count"], 3)
+            self.assertTrue(state["repeated_blocker_ignored"])
+            self.assertNotIn("blocked_reason", state)
+
     def test_review_only_tik_pass_does_not_complete_goal(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -471,7 +561,7 @@ class GoalRuntimeTests(unittest.TestCase):
             self.assertEqual(state["status"], "active")
             self.assertEqual(state["history"][-1]["event"], "review_only_tik_passed")
 
-    def test_invalid_tok_report_blocks_before_next_heartbeat(self) -> None:
+    def test_tok_report_is_runtime_owned_even_if_provider_writes_old_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             self._write_basic_project(root)
@@ -480,18 +570,16 @@ class GoalRuntimeTests(unittest.TestCase):
             config = load_config(root / "goal.toml")
             result = run_goal(config, RuntimeOptions(max_minutes=0))
 
-            self.assertEqual(result.exit_code, 1)
-            self.assertEqual(result.status, "blocked_tok_failed")
-            self.assertEqual(load_state(config)["status"], "blocked_tok_failed")
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.status, "active")
+            state = load_state(config)
+            self.assertEqual(state["status"], "active")
+            self.assertEqual(state["next_action"], "tok")
+            self.assertEqual(state["history"][-1]["event"], "tok_no_source_changes")
+            self.assertEqual(state["last_tok"]["revision_strategy"], "tok provider completed")
+            self.assertEqual((root / state["last_tok"]["report_path"]).read_text(encoding="utf-8").strip()[0], "{")
 
-            self._write_tok_behavior(root, {"mode": "success"})
-            retry_result = run_goal(config, RuntimeOptions(max_minutes=0))
-
-            self.assertEqual(retry_result.exit_code, 0)
-            self.assertEqual(retry_result.status, "active")
-            self.assertEqual(load_state(config)["status"], "active")
-
-    def test_tok_can_report_no_source_change_possible(self) -> None:
+    def test_tok_no_source_change_claim_is_ignored_without_gating(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             self._write_basic_project(root)
@@ -506,13 +594,17 @@ class GoalRuntimeTests(unittest.TestCase):
             config = load_config(root / "goal.toml")
             result = run_goal(config, RuntimeOptions(max_minutes=0))
 
-            self.assertEqual(result.exit_code, 1)
-            self.assertEqual(result.status, "blocked_no_source_change_possible")
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.status, "active")
             state = load_state(config)
-            self.assertEqual(state["status"], "blocked_no_source_change_possible")
-            self.assertEqual(state["blocked_reason"], "verdict requires evidence absent from writable sources")
+            self.assertEqual(state["status"], "active")
+            self.assertEqual(state["next_action"], "tok")
+            self.assertEqual(state["history"][-1]["event"], "tok_no_source_changes")
+            self.assertNotIn("blocked_reason", state)
+            self.assertEqual(state["last_tok"]["source_change_possible"], True)
+            self.assertEqual(state["last_tok"]["remaining_artifact_bottleneck"], "not reported by tok")
 
-    def test_codex_goal_tok_uses_output_schema_and_goals_feature(self) -> None:
+    def test_codex_goal_tok_uses_goal_feature_without_structured_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             bin_dir = root / "bin"
@@ -531,16 +623,11 @@ class GoalRuntimeTests(unittest.TestCase):
                     from pathlib import Path
 
                     args = sys.argv[1:]
-                    output_path = Path(args[args.index("--output-last-message") + 1])
-                    schema_path = Path(args[args.index("--output-schema") + 1])
                     assert "--enable" in args and "goals" in args
-                    assert schema_path.exists()
-                    output_path.write_text(json.dumps({
-                        "source_change_possible": True,
-                        "revision_strategy": "edit source",
-                        "expected_artifact_visible_improvement": ["artifact changes"],
-                        "remaining_artifact_bottleneck": "none known"
-                    }) + "\\n", encoding="utf-8")
+                    assert "--output-last-message" not in args
+                    assert "--output-schema" not in args
+                    prompt = sys.stdin.read()
+                    assert prompt == "/goal\\nrepair prompt\\n"
                     """
                 ).strip()
                 + "\n",
@@ -557,22 +644,25 @@ class GoalRuntimeTests(unittest.TestCase):
 
             self.assertTrue(result.ok, result.detail)
             self.assertEqual(result.report_path, run_dir / "tok_report.json")
-            self.assertTrue((run_dir / "tok_report.schema.json").exists())
+            self.assertFalse((run_dir / "tok_report.schema.json").exists())
+            self.assertEqual(result.report["revision_strategy"], "tok provider completed")
             log_text = (run_dir / "tok_codex.log").read_text(encoding="utf-8")
-            self.assertIn("--output-schema", log_text)
+            self.assertNotIn("--output-schema", log_text)
+            self.assertNotIn("--output-last-message", log_text)
             self.assertIn("--enable goals", log_text)
             self.assertIn("--add-dir", log_text)
             self.assertIn(str(run_dir / "attachments"), log_text)
             provider_prompt = (run_dir / "tok_codex_goal_prompt.md").read_text(encoding="utf-8")
-            self.assertTrue(provider_prompt.startswith("/goal\n"))
-            self.assertIn("Keep working according to the attached review", provider_prompt)
-            self.assertIn("Return the required report", provider_prompt)
+            self.assertEqual(provider_prompt, "/goal\nrepair prompt\n")
+            self.assertNotIn("Return the required report", provider_prompt)
+            self.assertNotIn("Do not claim artifact completion", provider_prompt)
+            self.assertNotIn("Keep working according to the attached review", provider_prompt)
             self.assertNotIn("tik", provider_prompt.lower())
             self.assertNotIn("tok", provider_prompt.lower())
             self.assertNotIn("bounded", provider_prompt.lower())
             self.assertNotIn("writable scopes", provider_prompt.lower())
 
-    def test_claude_code_goal_tok_writes_schema_report_from_structured_output(self) -> None:
+    def test_claude_code_goal_tok_synthesizes_runtime_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             bin_dir = root / "bin"
@@ -592,23 +682,16 @@ class GoalRuntimeTests(unittest.TestCase):
                     args = sys.argv[1:]
                     assert "--print" in args
                     assert args[args.index("--output-format") + 1] == "json"
-                    schema = json.loads(args[args.index("--json-schema") + 1])
-                    assert "source_change_possible" in schema["properties"]
+                    assert "--json-schema" not in args
                     assert args[args.index("--permission-mode") + 1] == "acceptEdits"
                     assert args[args.index("--allowedTools") + 1] == "Bash"
                     add_dirs = [args[index + 1] for index, arg in enumerate(args) if arg == "--add-dir"]
                     assert any(path.endswith("attachments") for path in add_dirs)
                     prompt = sys.stdin.read()
-                    assert prompt.startswith("Keep working according to the attached review")
+                    assert prompt == "repair prompt\\n"
                     assert "/goal" not in prompt
-                    assert "repair prompt" in prompt
-                    report = {
-                        "source_change_possible": True,
-                        "revision_strategy": "edit source",
-                        "expected_artifact_visible_improvement": ["artifact changes"],
-                        "remaining_artifact_bottleneck": "none known"
-                    }
-                    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "done", "structured_output": report}))
+                    assert "Return the required report as structured output" not in prompt
+                    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "done"}))
                     """
                 ).strip()
                 + "\n",
@@ -627,17 +710,19 @@ class GoalRuntimeTests(unittest.TestCase):
             self.assertEqual(result.report_path, run_dir / "tok_report.json")
             report = json.loads((run_dir / "tok_report.json").read_text(encoding="utf-8"))
             self.assertTrue(report["source_change_possible"])
-            self.assertTrue((run_dir / "tok_report.schema.json").exists())
+            self.assertEqual(report["revision_strategy"], "tok provider completed")
+            self.assertFalse((run_dir / "tok_report.schema.json").exists())
             log_text = (run_dir / "tok_claude_code.log").read_text(encoding="utf-8")
-            self.assertIn("--json-schema", log_text)
+            self.assertNotIn("--json-schema", log_text)
             self.assertIn("--permission-mode acceptEdits", log_text)
             provider_prompt = (run_dir / "tok_claude_code_goal_prompt.md").read_text(encoding="utf-8")
-            self.assertTrue(provider_prompt.startswith("Keep working according to the attached review"))
+            self.assertEqual(provider_prompt, "repair prompt\n")
+            self.assertNotIn("Do not claim artifact completion", provider_prompt)
             self.assertNotIn("/goal", provider_prompt)
             self.assertNotIn("tik", provider_prompt.lower())
             self.assertNotIn("bounded", provider_prompt.lower())
 
-    def test_codex_app_server_tok_drives_thread_goal_and_schema_turn(self) -> None:
+    def test_codex_app_server_tok_drives_thread_goal_without_schema_turn(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             bin_dir = root / "bin"
@@ -656,13 +741,6 @@ class GoalRuntimeTests(unittest.TestCase):
                     from pathlib import Path
 
                     assert sys.argv[1:] == ["app-server", "--stdio"]
-                    report = {
-                        "source_change_possible": True,
-                        "revision_strategy": "edit source through app-server",
-                        "expected_artifact_visible_improvement": ["artifact changes"],
-                        "remaining_artifact_bottleneck": "none known"
-                    }
-
                     def respond(request_id, result):
                         print(json.dumps({"id": request_id, "result": result}), flush=True)
 
@@ -681,19 +759,15 @@ class GoalRuntimeTests(unittest.TestCase):
                         elif method == "thread/goal/set":
                             assert params["threadId"] == "thread-1"
                             assert params["status"] == "active"
-                            assert "artifact" in params["objective"]
+                            assert params["objective"] == "repair prompt"
                             respond(request_id, {"goal": {"threadId": "thread-1", "objective": params["objective"], "status": "active"}})
                         elif method == "turn/start":
                             assert params["threadId"] == "thread-1"
                             assert params["approvalPolicy"] == "never"
-                            assert params["outputSchema"]["required"] == [
-                                "source_change_possible",
-                                "revision_strategy",
-                                "expected_artifact_visible_improvement",
-                                "remaining_artifact_bottleneck",
-                            ]
+                            assert "outputSchema" not in params
                             prompt = params["input"][0]["text"]
-                            assert prompt.startswith("Keep working according to the attached review")
+                            assert prompt == "repair prompt\\n"
+                            assert "Return the required report" not in prompt
                             assert "/goal" not in prompt
                             sandbox_policy = params["sandboxPolicy"]
                             assert sandbox_policy["type"] == "workspaceWrite"
@@ -704,21 +778,6 @@ class GoalRuntimeTests(unittest.TestCase):
                                 "method": "turn/completed",
                                 "params": {"threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed", "items": []}}
                             }), flush=True)
-                        elif method == "thread/read":
-                            respond(request_id, {
-                                "thread": {
-                                    "id": "thread-1",
-                                    "turns": [{
-                                        "items": [{
-                                            "type": "agentMessage",
-                                            "id": "agent-1",
-                                            "text": json.dumps(report),
-                                            "phase": None,
-                                            "memoryCitation": None
-                                        }]
-                                    }]
-                                }
-                            })
                         else:
                             raise SystemExit(f"unexpected method: {method}")
                     """
@@ -741,15 +800,16 @@ class GoalRuntimeTests(unittest.TestCase):
             self.assertTrue(result.ok, result.detail)
             self.assertEqual(result.report_path, run_dir / "tok_report.json")
             report = json.loads((run_dir / "tok_report.json").read_text(encoding="utf-8"))
-            self.assertEqual(report["revision_strategy"], "edit source through app-server")
+            self.assertEqual(report["revision_strategy"], "tok provider completed")
             self.assertEqual((root / "src" / "source.txt").read_text(encoding="utf-8"), "ready\n")
-            self.assertTrue((run_dir / "tok_report.schema.json").exists())
+            self.assertFalse((run_dir / "tok_report.schema.json").exists())
             log_text = (run_dir / "tok_codex_app_server.log").read_text(encoding="utf-8")
             self.assertIn("thread/goal/set", log_text)
             self.assertIn("turn/start", log_text)
             provider_prompt = (run_dir / "tok_codex_app_server_prompt.md").read_text(encoding="utf-8")
             self.assertFalse(provider_prompt.startswith("/goal"))
-            self.assertIn("Return the required report", provider_prompt)
+            self.assertEqual(provider_prompt, "repair prompt\n")
+            self.assertNotIn("Return the required report", provider_prompt)
 
     def test_claude_code_goal_plan_maps_sandbox_modes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -768,7 +828,7 @@ class GoalRuntimeTests(unittest.TestCase):
             self.assertEqual(args[args.index("--permission-mode") + 1], "acceptEdits")
             self.assertEqual(args[args.index("--allowedTools") + 1], "Bash")
             self.assertIn(f"Write({run_dir / 'attachments'}/**)", args[args.index("--disallowedTools") + 1])
-            self.assertEqual(json.loads(args[args.index("--json-schema") + 1]), TOK_REPORT_SCHEMA)
+            self.assertNotIn("--json-schema", args)
             add_dirs = [Path(args[index + 1]) for index, arg in enumerate(args) if arg == "--add-dir"]
             self.assertEqual(
                 add_dirs,
@@ -806,15 +866,10 @@ class GoalRuntimeTests(unittest.TestCase):
                     from pathlib import Path
 
                     args = sys.argv[1:]
-                    output_path = Path(args[args.index("--output-last-message") + 1])
+                    assert "--output-last-message" not in args
+                    assert "--output-schema" not in args
                     add_dirs = [Path(args[index + 1]) for index, arg in enumerate(args) if arg == "--add-dir"]
                     (add_dirs[-1] / "tik_review.md").write_text("mutated review\\n", encoding="utf-8")
-                    output_path.write_text(json.dumps({
-                        "source_change_possible": True,
-                        "revision_strategy": "edit source",
-                        "expected_artifact_visible_improvement": ["artifact changes"],
-                        "remaining_artifact_bottleneck": "none known"
-                    }) + "\\n", encoding="utf-8")
                     """
                 ).strip()
                 + "\n",
@@ -890,8 +945,9 @@ class GoalRuntimeTests(unittest.TestCase):
             self.assertNotIn("## Parsed Verdict", tik_ledger)
             self.assertEqual(tik_review.read_text(encoding="utf-8").strip(), tik_ledger.strip())
             self.assertIn(str(tik_review), tok_prompt)
+            self.assertNotIn("Artifact ownership rule:", tok_prompt)
+            self.assertNotIn("edit prohibition is enforced by Codex/Claude hooks", tok_prompt)
             self.assertNotIn(tik_ledger.strip(), tok_prompt)
-            self.assertNotIn("tok", tok_prompt.lower())
             self.assertNotIn("ledger", tok_prompt.lower())
             self.assertNotIn("bounded", tok_prompt.lower())
             self.assertNotIn("writable scopes", tok_prompt.lower())
@@ -1192,10 +1248,12 @@ class GoalRuntimeTests(unittest.TestCase):
             finally:
                 os.environ["PATH"] = old_path
 
-            self.assertEqual(result.exit_code, 1)
-            self.assertEqual(result.status, "blocked_tok_failed")
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.status, "active")
             state = load_state(config)
-            self.assertEqual(state["status"], "blocked_tok_failed")
+            self.assertEqual(state["status"], "active")
+            self.assertEqual(state["next_action"], "tok")
+            self.assertEqual(state["history"][-1]["event"], "tok_failed_ignored")
             log_text = Path(state["last_run_dir"], "tok_codex.log")
             self.assertIn("failed to start command", (root / log_text).read_text(encoding="utf-8"))
 
@@ -1218,7 +1276,7 @@ class GoalRuntimeTests(unittest.TestCase):
             elapsed = time.monotonic() - started
 
             self.assertEqual(result.exit_code, 1)
-            self.assertEqual(result.status, "blocked_producer_failed")
+            self.assertEqual(result.status, "blocked_invalid_review_evidence")
             self.assertLess(elapsed, 2.0)
             self.assertIn("timed out", (result.run_dir / "producer.log").read_text(encoding="utf-8"))
 
@@ -1240,13 +1298,10 @@ class GoalRuntimeTests(unittest.TestCase):
         self.assertIn("Make the editable source yield", prompt_text)
         self.assertIn("via `{producer_command}`", prompt_text)
         self.assertIn("manuscript PDF", prompt_text)
-        self.assertIn("APSR standard defined by the referee report at {tik_review_path}", prompt_text)
-        self.assertIn("success means that PDF answers every blocking objection", prompt_text)
+        self.assertIn("meets the APSR standards. Your work should adress the concerns raised in {tik_review_path}.", prompt_text)
+        self.assertNotIn("success means", prompt_text)
+        self.assertNotIn("publication standards defined by the report", prompt_text)
         self.assertIn("{tik_review_path}", prompt_text)
-        self.assertIn("Manual edits are limited to:", config.tok.prompt_template)
-        self.assertIn("Commands may run from {tok_run_cwd}", config.tok.prompt_template)
-        self.assertIn("generated side effects may update", config.tok.prompt_template)
-        self.assertIn("Do not hand-edit data/, scripts/, generated outputs, .goal/, or the manuscript", config.tok.prompt_template)
         rejected_tok_terms = [
             "keep working",
             "repair",
@@ -1254,6 +1309,14 @@ class GoalRuntimeTests(unittest.TestCase):
             "revision",
             "heartbeat",
             "strongest",
+            "aggregate tik",
+            "dp16276 checklist standards",
+            "manual edits",
+            "commands may run",
+            "generated side effects",
+            "runtime writes",
+            "do not hand-edit",
+            "edit prohibition",
             "paper itself",
             "produce manuscript",
             "rebuilt PDF",
@@ -1261,9 +1324,9 @@ class GoalRuntimeTests(unittest.TestCase):
         lower_tok_prompt = config.tok.prompt_template.lower()
         for term in rejected_tok_terms:
             self.assertNotIn(term.lower(), lower_tok_prompt)
-        self.assertIn("{writable_scopes}", prompt_text)
-        self.assertIn("{runtime_writable_scopes}", prompt_text)
-        self.assertIn("{tok_run_cwd}", prompt_text)
+        self.assertNotIn("{writable_scopes}", prompt_text)
+        self.assertNotIn("{runtime_writable_scopes}", prompt_text)
+        self.assertNotIn("{tok_run_cwd}", prompt_text)
 
     def test_scientificity_example_validates_after_copy_to_project_root(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -1475,13 +1538,18 @@ max_blocker_repeats = 3
                 from pathlib import Path
 
                 args = sys.argv[1:]
-                output_path = Path(args[args.index("--output-last-message") + 1])
-                schema_path = Path(args[args.index("--output-schema") + 1])
                 workspace = Path(args[args.index("-C") + 1])
                 root = workspace if (workspace / "goal.toml").exists() else workspace.parent
                 assert args[0] == "exec"
                 assert "--enable" in args and "goals" in args
-                assert schema_path.exists()
+                assert "--output-last-message" not in args
+                assert "--output-schema" not in args
+                prompt = sys.stdin.read()
+                assert prompt.startswith("/goal\\n")
+                assert "Return the required report" not in prompt
+                attachment_dirs = [Path(args[index + 1]) for index, arg in enumerate(args) if arg == "--add-dir" and args[index + 1].endswith("attachments")]
+                run_dir = attachment_dirs[0].parent if attachment_dirs else root / ".goal" / "runs" / "unknown"
+                output_path = run_dir / "tok_report.json"
                 behavior_path = root / "scripts" / "tok_behavior.json"
                 behavior = json.loads(behavior_path.read_text(encoding="utf-8")) if behavior_path.exists() else {"mode": "success"}
                 if behavior["mode"] == "invalid":
@@ -1496,12 +1564,10 @@ max_blocker_repeats = 3
                     }) + "\\n", encoding="utf-8")
                     raise SystemExit(0)
                 if behavior["mode"] == "success_no_change":
-                    output_path.write_text(json.dumps({
-                        "source_change_possible": True,
-                        "revision_strategy": "no-op despite report",
-                        "expected_artifact_visible_improvement": ["artifact says ready"],
-                        "remaining_artifact_bottleneck": "none known"
-                    }) + "\\n", encoding="utf-8")
+                    raise SystemExit(0)
+                if behavior["mode"] == "metadata_only":
+                    (root / ".DS_Store").write_bytes(b"root metadata")
+                    (root / "src" / ".DS_Store").write_bytes(b"source metadata")
                     raise SystemExit(0)
                 if behavior["mode"] == "mutate_artifact":
                     (root / "output" / "artifact.txt").write_text("hand-edited artifact\\n", encoding="utf-8")
@@ -1510,12 +1576,6 @@ max_blocker_repeats = 3
                 if behavior["mode"] == "mutate_unexpected":
                     (root / "scripts" / "tok-side-effect.txt").write_text("unexpected side effect\\n", encoding="utf-8")
                 (root / "src" / "source.txt").write_text("ready\\n", encoding="utf-8")
-                output_path.write_text(json.dumps({
-                    "source_change_possible": True,
-                    "revision_strategy": "replace draft marker",
-                    "expected_artifact_visible_improvement": ["artifact says ready"],
-                    "remaining_artifact_bottleneck": "none known"
-                }) + "\\n", encoding="utf-8")
                 """
             ).strip()
             + "\n",

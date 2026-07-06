@@ -218,7 +218,7 @@ the skill must be installed in the reviewing CLI (Codex skill config for
 Then adjust artifact paths, write dirs, tik provider settings, and the producer
 command for that repository.
 
-## no-mistakes Gate
+## no-mistakes Checkpoint
 
 The no-mistakes integration has no interactive mode. It is enabled by default;
 every non-dry-run heartbeat starts from a checkpointed clean Git worktree, and
@@ -253,12 +253,13 @@ default branches and tells users to create a feature branch.
 the full review/test/docs/lint/PR/CI latency. Use `mode = "full"` for the full
 pipeline, or `mode = "fast"` to keep local quality steps but skip push/PR/CI.
 
-If Git setup, no-mistakes availability, or a non-default-branch gate fails, the run exits as
-`blocked_no_mistakes_failed`.
+If Git setup, no-mistakes availability, or a non-default-branch check fails,
+goal-cli records the failure in state/history and keeps the heartbeat active.
+This is deliberate: no-mistakes is checkpoint evidence, not a hard runtime gate.
 
 If the heartbeat wall-clock budget expires during no-mistakes preparation or
-the gate, the run records `budget_limited` and can be continued by a later
-heartbeat.
+checkpoint work, goal-cli records the no-mistakes status in state/history and
+keeps the heartbeat active.
 
 Use `enabled = false` only for isolated tests or diagnostics that intentionally
 do not run inside a Git repository.
@@ -268,7 +269,7 @@ do not run inside a Git repository.
 For unattended progress, install a per-user OS timer:
 
 ```bash
-goal-cli heartbeat install --every-minutes 60 --max-minutes 30
+goal-cli heartbeat install --every-minutes 30 --max-minutes 600
 ```
 
 On macOS this writes a LaunchAgent under `~/Library/LaunchAgents/`. On Linux it
@@ -280,7 +281,7 @@ under `.goal/system-heartbeat/`.
 The timer does not create a multi-cycle CLI mode. Each OS tick invokes:
 
 ```bash
-goal-cli -c /absolute/path/to/goal.toml heartbeat tick --max-minutes 30
+goal-cli -c /absolute/path/to/goal.toml heartbeat tick --max-minutes 600
 ```
 
 `heartbeat tick` cleans stale interrupted runtime state, runs one heartbeat, and
@@ -323,7 +324,7 @@ Use a non-default config path by placing the global option before the command:
 
 ```bash
 goal-cli -c path/to/goal.toml validate
-goal-cli -c path/to/goal.toml run --max-minutes 30
+goal-cli -c path/to/goal.toml run --max-minutes 600
 ```
 
 Setup readiness:
@@ -376,7 +377,7 @@ checks the configured command by default; no extra smoke flag is needed.
 Run one heartbeat:
 
 ```bash
-goal-cli run --max-minutes 30
+goal-cli run --max-minutes 600
 ```
 
 Inspect state:

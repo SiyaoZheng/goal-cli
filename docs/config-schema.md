@@ -204,7 +204,8 @@ Freshness fields are optional but enforced when present. If a verdict says
 `review_matches_current_pdf = false`, or if `current_pdf_sha256`,
 `current_artifact_sha256`, `reviewed_pdf_sha256`, or
 `reviewed_artifact_sha256` does not match the runtime artifact hash, the run
-records `blocked_stale_tik_review` and asks for a fresh tik pass before tok.
+records `blocked_invalid_review_evidence` and asks for a fresh tik pass before
+tok.
 
 Each tik pass writes `tik.md` in the run directory. In single-provider mode,
 that file contains the provider review with the control JSON stripped out. In
@@ -230,15 +231,15 @@ sandbox = "workspace-write"
 codex_features = ["goals"]
 ```
 
-`codex_goal` launches `codex exec` with `/goal`, `--enable goals`, and the tok
-report schema. Tok treats every pass as the last pass: read `tik.md`, use the
-tik review as the standard to meet, edit source under `write_dirs`, and leave
-source ready for the next artifact to answer the review's blocking objections.
+`codex_goal` launches `codex exec` with `/goal` and `--enable goals`. Tok treats
+every pass as the last pass: read `tik.md`, use the tik review as the standard
+to meet, edit source under `write_dirs`, and leave source ready for the next
+artifact to answer the review's blocking objections.
 `write_dirs` are the protocol and audit boundary for source edits, not a hard
 OS sandbox guarantee when `run_cwd` or trusted sandbox modes grant broader local
 authority. The runtime snapshots these directories before and after tok, records
-the actual changed paths, and blocks successful tok reports that make no source
-change. `write_dirs` must stay inside the project root and must not overlap
+the actual changed paths, and keeps the loop active if no source files changed.
+`write_dirs` must stay inside the project root and must not overlap
 `.git`, state directories, run directories, generated directories, or the
 canonical artifact.
 
@@ -257,11 +258,9 @@ sandbox = "workspace-write"
 
 `codex_app_server` launches `codex app-server --stdio`, starts an ephemeral
 thread, sets a real thread goal through `thread/goal/set`, and runs the work
-pass through `turn/start` with the same tok report schema passed as
-`outputSchema`. The runtime waits for `turn/completed`, reads the final agent
-message from `thread/read`, and writes the parsed report to `tok_report.json`.
-It uses the same attachment integrity check and source-change audit as
-`codex_goal`.
+pass through `turn/start`. The runtime waits for `turn/completed`, then writes
+its own audit report to `tok_report.json`. It uses the same attachment
+integrity check and source-change audit as `codex_goal`.
 
 ```toml
 [tok]
@@ -272,12 +271,12 @@ runtime_write_dirs = ["output", "build", "logs"]
 sandbox = "workspace-write"
 ```
 
-`claude_code_goal` launches `claude --print` with the tok report schema passed
-through `--json-schema`; the runtime reads the validated report from the
-`structured_output` field of the JSON envelope and writes it to
-`tok_report.json`. The same `write_dirs`, `run_cwd`, and `runtime_write_dirs`
-semantics apply: the working directory is `run_cwd`, and every other write
-scope plus the run attachments directory is granted through `--add-dir`.
+`claude_code_goal` launches `claude --print` and treats a successful JSON
+envelope as provider completion; it does not request structured model output.
+The runtime writes its own audit report to `tok_report.json`. The same
+`write_dirs`, `run_cwd`, and `runtime_write_dirs` semantics apply: the working
+directory is `run_cwd`, and every other write scope plus the run attachments
+directory is granted through `--add-dir`.
 `codex_features` only affects the `codex_goal` exec path; it is ignored for
 `codex_app_server` and `claude_code_goal`.
 
@@ -291,8 +290,8 @@ The `sandbox` field maps onto Claude Code permissions:
 
 Like Codex `workspace-write`, the mapping is a protocol boundary, not a hard OS
 sandbox: `acceptEdits` auto-accepts file edits in the granted directories and
-`Bash` runs unsandboxed commands. The runtime's source-diff audit and the
-no-mistakes Git gate remain the enforcement layer.
+`Bash` runs unsandboxed commands. Source-diff and mutation files are audit
+evidence, not goal-cli hard gates.
 
 `runtime_write_dirs` is intentionally separate from `write_dirs`. It grants the
 tok process access to directories that may be updated by commands it runs, such
@@ -300,12 +299,13 @@ as `output`, `build`, or `logs`, without declaring those directories as source
 edit scopes. Runtime write dirs may overlap generated directories and the
 artifact output directory, but they must stay inside the project root and must
 not be the project root, `.git`, the goal config, or goal state/run directories.
-The runtime records artifact provenance before and after tok in
-`tok_artifact_provenance.json`; the next producer pass records
-`producer_artifact_provenance.json` so the next producer/tik pass can be traced
-to a rebuilt artifact, not just a tok claim.
+Tok may run the producer command or other commands for source validation. If
+those commands try to rewrite the configured artifact, the edit prohibition is
+enforced by Codex/Claude hooks. goal-cli records before/after hashes in
+`tok_artifact_provenance.json` and does not attempt restore logic.
 
-Tok reports must match this JSON shape:
+`tok_report.json` is runtime-owned audit metadata, not model output. It keeps
+this compatibility shape:
 
 ```json
 {
@@ -316,17 +316,40 @@ Tok reports must match this JSON shape:
 }
 ```
 
-If no source change is possible, tok reports
-`"source_change_possible": false`; the runtime records
-`blocked_no_source_change_possible`.
-Tok does not report changed file paths. The runtime writes the local evidence to
+Tok does not report changed file paths or whether source changes are possible.
+The runtime writes the local evidence to
 `tok_source_changes.json` and stores it in state as
 `last_tok.actual_sources_changed`.
 
-## no-mistakes Gate
+## Hard Gate Policy
 
-`goal-cli` can use `kunchenguid/no-mistakes` as the Git gate for heartbeat
-checkpoints.
+goal-cli only hard-gates invalid review evidence: conditions where tok cannot
+trust the producer/tik evidence it would act on:
+
+- invalid configuration or setup validation failure;
+- producer failure or missing configured artifact;
+- tik provider failure, unparseable tik verdict, or stale tik review.
+
+The following are deliberately not hard gates. goal-cli records them and then
+keeps the heartbeat loop active:
+
+- tok provider failure or timeout;
+- tok writes outside declared source/runtime scopes;
+- transient generated side effects under `runtime_write_dirs`;
+- attempted artifact writes, which should be blocked by Codex/Claude hooks and
+  are recorded by goal-cli if they occur;
+- repeated tik objections;
+- tok completing without source changes;
+- no-mistakes setup, checkpoint, or review failure.
+
+These conditions may matter to a project owner, but goal-cli intentionally does
+not decide them. It does not escalate them, ask for judgment, or stop the loop.
+If a project wants to enforce tok edit prohibitions, enforce them in
+Codex/Claude hooks. goal-cli only stops on producer/tik evidence validity.
+
+## no-mistakes Checkpoint
+
+`goal-cli` can use `kunchenguid/no-mistakes` for heartbeat checkpoints.
 
 ```toml
 [no_mistakes]
@@ -370,12 +393,14 @@ single-person mainline branch, records `no_mistakes_default_branch_skipped`,
 and does not invoke `no-mistakes axi run`, because no-mistakes refuses to
 validate default branches and asks users to create a feature branch.
 
-Missing Git setup, a missing no-mistakes binary, or a failed gate records
-`blocked_no_mistakes_failed`.
+Missing Git setup, a missing no-mistakes binary, or a failed no-mistakes check
+is recorded in `last_no_mistakes` and history, then ignored by the runtime
+state machine. This is deliberate: no-mistakes evidence is useful, but it is
+not a hard gate.
 
 If the heartbeat wall-clock budget is exhausted during no-mistakes preparation
-or gating, the runtime records `budget_limited` with `next_action = "tik"` so a
-later heartbeat can continue from file state.
+or checkpoint work, the runtime records the no-mistakes status in state/history
+and keeps the heartbeat active.
 
 ## Observability
 
@@ -457,7 +482,8 @@ max_history_items = 50
 
 - `generated_dirs`: protected generated outputs; tok write scopes cannot
   overlap them.
-- `max_blocker_repeats`: repeated identical tik objections block the run.
+- `max_blocker_repeats`: repeated identical tik objections are counted and
+  marked as ignored; they do not block the run.
 - `lock_stale_seconds`: stale lock age.
 - `max_history_items`: retained state history entries.
 
@@ -470,17 +496,11 @@ provider evidence under `.goal/runs/`.
 | --- | --- |
 | `active` | The goal can continue on a later heartbeat. |
 | `complete` | The rebuilt artifact passed tik. |
-| `blocked_producer_failed` | The producer command failed. |
-| `blocked_artifact_missing` | The producer finished but `[artifact].path` was missing. |
-| `blocked_tik_failed` | The tik provider failed before producing a memo. |
-| `blocked_unparseable_tik` | Tik output did not contain the configured verdict JSON. |
-| `blocked_stale_tik_review` | Tik reviewed a stale artifact hash or declared the review stale. |
-| `blocked_tok_failed` | The tok provider failed or returned an invalid schema report. |
-| `blocked_no_source_change_possible` | Tok reported that no source change is possible. |
-| `blocked_tok_no_source_changes` | Tok returned success but the runtime found no changes under `tok.write_dirs`. |
-| `blocked_repeated_same_objection` | The configured blocker fingerprint repeated too many times. |
-| `blocked_no_mistakes_failed` | Git setup, checkpointing, or no-mistakes gating failed. |
-| `budget_limited` | The heartbeat wall-clock budget expired during no-mistakes work. |
+| `blocked_invalid_review_evidence` | Producer/tik evidence is missing, failed, unparseable, or stale, so tok cannot safely act on it. |
+
+Non-gating observations such as repeated blockers, no source changes, provider
+failures, and no-mistakes failures remain in history, provenance files, and
+`last_*` state fields while the status stays `active`.
 
 ## Setup Readiness
 
@@ -502,15 +522,15 @@ checks:
 - Codex CLI availability when `tok.provider = "codex_goal"`,
   `tok.provider = "codex_app_server"`, or `tik.provider = "codex_file"`;
 - Claude Code CLI availability and `claude` flag support (`--print`,
-  `--output-format`, `--disallowedTools`, `--model`, plus `--json-schema`,
-  `--add-dir`, and `--permission-mode` when `tok.provider =
+  `--output-format`, `--disallowedTools`, `--model`, plus `--add-dir` and
+  `--permission-mode` when `tok.provider =
   "claude_code_goal"`) when a Claude Code provider is configured;
 - OpenTelemetry package availability and the runtime telemetry export plan
   (OTLP when reachable or explicitly environment-configured, local JSONL
   fallback otherwise);
-- `codex exec` support for `--output-schema`, `--output-last-message`,
-  `--enable`, `--add-dir`, `--sandbox`, and `--ephemeral` when
-  `tik.provider = "codex_file"`;
+- `codex exec` support for `--enable`, `--add-dir`, `--sandbox`, and
+  `--skip-git-repo-check` when `tok.provider = "codex_goal"`, plus
+  `--output-last-message` and `--ephemeral` when `tik.provider = "codex_file"`;
 - `codex app-server --help` support for `--stdio` when `tok.provider =
   "codex_app_server"`;
 - API tik `openai` package and API key readiness when `tik.provider = "api"`.
@@ -526,8 +546,8 @@ goal-cli doctor --smoke-codex-goal
 ```
 
 The smoke check starts a minimal internal Codex `/goal` in a temporary writable
-directory, asks it to create a temporary source file, and validates the
-schema-shaped tok report. It does not touch project sources.
+directory and asks it to create a temporary source file. It does not touch
+project sources.
 
 For `tok.provider = "codex_app_server"`, run the Codex app-server smoke
 instead:
@@ -537,8 +557,8 @@ goal-cli doctor --smoke-codex-app-server
 ```
 
 That smoke check uses `codex app-server --stdio`, creates an ephemeral thread,
-sets a thread goal, starts a schema-constrained turn, and validates the same
-tok report contract in a temporary workspace.
+sets a thread goal, starts a turn, and validates that a temporary source file is
+created in a temporary workspace.
 
 For `tok.provider = "claude_code_goal"`, run the Claude Code tok smoke instead:
 
@@ -578,7 +598,7 @@ goal-cli cleanup --kill-orphans
 Install an OS-level timed heartbeat:
 
 ```bash
-goal-cli heartbeat install --every-minutes 30 --max-minutes 30
+goal-cli heartbeat install --every-minutes 30 --max-minutes 600
 goal-cli heartbeat status
 ```
 

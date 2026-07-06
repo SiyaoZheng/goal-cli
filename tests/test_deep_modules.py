@@ -224,7 +224,7 @@ class ReadyProbeAdapter:
         return subprocess.CompletedProcess(
             command,
             0,
-            "--output-schema --output-last-message --enable --add-dir --sandbox --skip-git-repo-check --ephemeral\n",
+            "--output-last-message --enable --add-dir --sandbox --skip-git-repo-check --ephemeral\n",
             "",
         )
 

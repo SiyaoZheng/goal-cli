@@ -9,8 +9,9 @@ from pathlib import Path
 from unittest import mock
 
 from goal_cli.config import load_config
-from goal_cli.runtime import CleanupResult, RunResult
+from goal_cli.runtime import DEFAULT_MAX_MINUTES, CleanupResult, RunResult
 from goal_cli.system_heartbeat import (
+    DEFAULT_EVERY_MINUTES,
     SystemHeartbeatOptions,
     build_system_heartbeat_layout,
     install_system_heartbeat,
@@ -19,6 +20,26 @@ from goal_cli.system_heartbeat import (
 
 
 class SystemHeartbeatTests(unittest.TestCase):
+    def test_default_layout_uses_ten_hour_tick_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            xdg_config = root / "xdg"
+            config = load_config(self._write_project(root))
+
+            with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(xdg_config)}):
+                layout = build_system_heartbeat_layout(
+                    config,
+                    SystemHeartbeatOptions(
+                        manager="systemd-user",
+                        label="goal-cli-test",
+                    ),
+                )
+
+            self.assertEqual(layout.max_minutes, DEFAULT_MAX_MINUTES)
+            self.assertEqual(layout.interval_seconds, 1800)
+            self.assertEqual(DEFAULT_EVERY_MINUTES, 30.0)
+            self.assertEqual(layout.tick_args[-2:], ("--max-minutes", "600"))
+
     def test_launchd_layout_runs_one_absolute_tick(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

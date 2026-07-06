@@ -103,8 +103,7 @@ This means a goal is not:
 The outer goal is artifact-level. Each tok pass is an internal Codex `/goal`.
 It treats itself as the last tok: read `tik.md`, make runtime-audited source
 changes, leave source ready for the next artifact to answer tik's blocking
-objections, write the schema report, and stop. Tok never completes the
-artifact-level goal.
+objections, and stop. Tok never completes the artifact-level goal.
 
 After the producer, the runtime has exactly two sequential roles:
 
@@ -136,13 +135,12 @@ After the producer, the runtime has exactly two sequential roles:
 7. Reject stale or unparseable tik output before tok.
 8. If the tik passes, run the completion gate and mark the goal complete.
 9. If the tik fails, launch one tok pass against validated source boundaries.
-10. Record the schema-checked tok report plus runtime source-diff evidence in
+10. Record the runtime-owned tok audit report plus source-diff evidence in
     files.
-11. Gate successful source changes, then exit with file state ready for the
-    next heartbeat.
+11. Exit with file state ready for the next heartbeat.
 
 In short: `producer -> tik -> tok` when tik fails, or `producer -> tik` when tik
-passes. The tok's own report is never accepted as artifact success.
+passes. Tok is not asked to report artifact success.
 
 Heartbeat is the unit of autonomous work. A run contains exactly one heartbeat,
 then exits. The next run continues from file state and may rebuild the artifact
@@ -158,9 +156,9 @@ from file state.
 - Heartbeat State: `HeartbeatRecorder` owns state/history/heartbeat writes
   and transition recording. The runner orchestrates producer, tik, and tok; it
   does not hand-edit heartbeat JSON.
-- Tok Execution: `tok_execution` owns the Codex `/goal` and Claude Code
-  structured-output commands, schema, prompt
-  files, report parsing, validation log, and structured `TokExecutionResult`.
+- Tok Execution: `tok_execution` owns the Codex `/goal`, Codex app-server, and
+  Claude Code tok commands, prompt files, attachment integrity check, and
+  runtime-owned audit `TokExecutionResult`.
 - Setup Readiness and Telemetry: doctor uses the same tok smoke path and
   `TelemetryExportPlan` that runtime uses, so readiness checks do not describe
   a separate imaginary path.
@@ -175,7 +173,7 @@ Runtime prompts are closed-system prompts. They may refer to:
 - The current state budget.
 - The writable source scopes.
 - Operational impossibilities such as build failure, missing evidence, invalid
-  outputs, repeated identical blockers, or no source change possible.
+  outputs, or repeated identical blockers.
 - Prior directions tried, when needed to enforce direction diversity.
 - The fact that the tok is an internal Codex `/goal` with completion limited
   to source changes.
@@ -190,17 +188,11 @@ to tik or tok agents.
 Prefer terminal or blocked states such as:
 
 - `complete`
-- `blocked_producer_failed`
-- `blocked_artifact_missing`
-- `blocked_tik_failed`
-- `blocked_unparseable_tik`
-- `blocked_stale_tik_review`
-- `blocked_tok_failed`
-- `blocked_tok_no_source_changes`
-- `blocked_repeated_same_objection`
-- `blocked_no_source_change_possible`
-- `blocked_no_mistakes_failed`
-- `budget_limited`
+- `blocked_invalid_review_evidence`
 
 Avoid state names that imply a user, author, maintainer, approver, or human
 decision is part of the runtime loop.
+
+Repeated objections, no source changes, tok provider failures, and no-mistakes
+failures are intentionally not blocked states. They are recorded as machine
+evidence while the heartbeat remains active.

@@ -6,12 +6,13 @@ import sys
 from pathlib import Path
 
 from .config import ConfigError, dump_config_summary, load_config, validate_config
-from .runtime import RuntimeOptions, cleanup_runtime, heartbeat_run_dir, load_state, render_prompts_to_run_dir, reset_state, run_heartbeat, run_goal
+from .runtime import DEFAULT_MAX_MINUTES, RuntimeOptions, cleanup_runtime, heartbeat_run_dir, load_state, render_prompts_to_run_dir, reset_state, run_heartbeat, run_goal
 from .setup_check import DoctorOptions, doctor_exit_code, format_doctor_checks, run_doctor
 from .system_heartbeat import (
     MANAGER_AUTO,
     MANAGER_LAUNCHD,
     MANAGER_SYSTEMD_USER,
+    DEFAULT_EVERY_MINUTES,
     SystemHeartbeatOptions,
     SystemHeartbeatResult,
     install_system_heartbeat,
@@ -71,18 +72,8 @@ codex_features = ["goals"]
 
 [tok.prompt]
 template = \"\"\"
-Make the editable source yield, via `{producer_command}`, an artifact that
-meets the standard defined by the tik review at {tik_review_path}; success
-means that artifact answers every blocking objection in that review.
-
-Manual edits are limited to:
-{writable_scopes}
-
-Commands may run from {tok_run_cwd}; generated side effects may update:
-{runtime_writable_scopes}
-
-Do not hand-edit generated outputs, .goal/, or the artifact. Return the
-required schema report after the source pass.
+Make the editable source yield, via `{producer_command}`, the configured artifact.
+Your work should address the concerns raised in {tik_review_path}.
 \"\"\"
 
 [no_mistakes]
@@ -131,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Run exactly one heartbeat: producer rebuild, tik review, then tok only if review fails.",
     )
     run_parser.add_argument("--dry-run", action="store_true", help="Create a run directory and render prompts without running producer, tik, or tok")
-    run_parser.add_argument("--max-minutes", type=float, default=30.0, help="Maximum wall-clock minutes for the heartbeat, including providers and no-mistakes")
+    run_parser.add_argument("--max-minutes", type=float, default=DEFAULT_MAX_MINUTES, help="Maximum wall-clock minutes for the heartbeat, including providers and no-mistakes")
     subparsers.add_parser(
         "tik",
         help="Rebuild the artifact and run tik review, but skip tok",
@@ -149,8 +140,8 @@ def main(argv: list[str] | None = None) -> int:
         description="Install a launchd LaunchAgent on macOS or a systemd user timer on Linux.",
     )
     _add_system_heartbeat_identity_args(heartbeat_install)
-    heartbeat_install.add_argument("--every-minutes", type=float, default=60.0, help="Timer interval in minutes; must be positive")
-    heartbeat_install.add_argument("--max-minutes", type=float, default=30.0, help="Maximum wall-clock minutes for each heartbeat tick")
+    heartbeat_install.add_argument("--every-minutes", type=float, default=DEFAULT_EVERY_MINUTES, help="Timer interval in minutes; must be positive")
+    heartbeat_install.add_argument("--max-minutes", type=float, default=DEFAULT_MAX_MINUTES, help="Maximum wall-clock minutes for each heartbeat tick")
     heartbeat_install.add_argument("--no-start", action="store_true", help="Write service files but do not load or start the timer")
     heartbeat_install.add_argument("--force", action="store_true", help="Overwrite an existing goal-cli-managed service file")
     heartbeat_install.add_argument("--dry-run", action="store_true", help="Print files and commands without writing or starting anything")
@@ -166,7 +157,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Run one hardened heartbeat tick for the OS scheduler",
         description="Clean stale heartbeat state, run exactly one heartbeat, and treat active locks as a skipped tick.",
     )
-    heartbeat_tick.add_argument("--max-minutes", type=float, default=30.0, help="Maximum wall-clock minutes for this heartbeat tick")
+    heartbeat_tick.add_argument("--max-minutes", type=float, default=DEFAULT_MAX_MINUTES, help="Maximum wall-clock minutes for this heartbeat tick")
     subparsers.add_parser("state", help="Print state JSON or the default initial state")
     subparsers.add_parser("reset", help="Remove state and stale lock while preserving run artifacts")
     cleanup_parser = subparsers.add_parser(
@@ -239,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
             config,
             RuntimeOptions(
                 dry_run=getattr(args, "dry_run", False),
-                max_minutes=getattr(args, "max_minutes", 30.0),
+                max_minutes=getattr(args, "max_minutes", DEFAULT_MAX_MINUTES),
             ),
         )
         print(run_result.message)

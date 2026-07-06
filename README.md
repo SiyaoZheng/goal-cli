@@ -290,8 +290,8 @@ python3 -m pip install -e .
 | `goal-cli validate` | Check that the config is shaped correctly. |
 | `goal-cli doctor` | Check whether the local setup is ready to run. |
 | `goal-cli run --dry-run` | Render the prompts and run folder without calling repair agents. |
-| `goal-cli run --max-minutes 30` | Run one bounded work pass. |
-| `goal-cli heartbeat install --every-minutes 60 --max-minutes 30` | Install a per-user OS timer that triggers one heartbeat per tick. |
+| `goal-cli run --max-minutes 600` | Run one bounded work pass. |
+| `goal-cli heartbeat install --every-minutes 30 --max-minutes 600` | Install a per-user OS timer that triggers one heartbeat per tick. |
 | `goal-cli heartbeat status` | Show the OS timer status and managed paths. |
 | `goal-cli tik` | Rebuild and review the output without running a repair pass. |
 | `goal-cli state` | Show the current saved state. |

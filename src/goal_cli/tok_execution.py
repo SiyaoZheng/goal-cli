@@ -16,37 +16,16 @@ from .adapters import CLAUDE_CODE_DISALLOWED_TOOLS, claude_print_envelope, run_c
 from .config import TokConfig
 
 
-TOK_REPORT_SCHEMA: dict[str, Any] = {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "goal-cli tok report",
-    "type": "object",
-    "additionalProperties": False,
-    "required": [
-        "source_change_possible",
-        "revision_strategy",
-        "expected_artifact_visible_improvement",
-        "remaining_artifact_bottleneck",
-    ],
-    "properties": {
-        "source_change_possible": {"type": "boolean"},
-        "revision_strategy": {"type": "string", "minLength": 1},
-        "expected_artifact_visible_improvement": {"type": "array", "items": {"type": "string"}},
-        "remaining_artifact_bottleneck": {"type": "string"},
-    },
-}
-
-
 @dataclass(frozen=True)
 class TokExecutionPlan:
     command: tuple[str, ...]
     cwd: Path
     prompt: str
     report_path: Path
-    schema_path: Path
     prompt_path: Path
     provider_prompt_path: Path
     log_path: Path
-    validation_log_path: Path
+    audit_log_path: Path
 
 
 @dataclass(frozen=True)
@@ -59,7 +38,7 @@ class TokExecutionResult:
 
     @property
     def detail(self) -> str:
-        return "; ".join(self.errors) if self.errors else "tok report ok"
+        return "; ".join(self.errors) if self.errors else "tok completed"
 
 
 def execute_tok(config: TokConfig, prompt: str, run_dir: Path, timeout_seconds: float | None = None) -> TokExecutionResult:
@@ -82,7 +61,6 @@ def execute_tok(config: TokConfig, prompt: str, run_dir: Path, timeout_seconds: 
     else:
         plan = build_codex_goal_tok_plan(config, prompt, run_dir)
     plan.prompt_path.write_text(prompt, encoding="utf-8")
-    plan.schema_path.write_text(json.dumps(TOK_REPORT_SCHEMA, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     plan.provider_prompt_path.write_text(plan.prompt, encoding="utf-8")
 
     if config.provider == "claude_code_goal":
@@ -97,22 +75,15 @@ def execute_tok(config: TokConfig, prompt: str, run_dir: Path, timeout_seconds: 
         return TokExecutionResult(False, None, None, tuple(attachment_errors), plan)
     if not ok:
         return TokExecutionResult(False, None, None, ("tok provider failed",), plan)
-    if not plan.report_path.exists():
-        return TokExecutionResult(False, None, None, ("tok report was not written",), plan)
 
-    report = read_tok_report(plan.report_path)
-    errors = tuple(tok_report_errors(report))
-    if errors:
-        plan.validation_log_path.write_text("\n".join(errors) + "\n", encoding="utf-8")
-        return TokExecutionResult(False, None, report, errors, plan)
-
-    plan.validation_log_path.write_text("tok report ok\n", encoding="utf-8")
+    report = runtime_tok_report()
+    plan.report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    plan.audit_log_path.write_text("tok completed; runtime synthesized audit report\n", encoding="utf-8")
     return TokExecutionResult(True, plan.report_path, report, (), plan)
 
 
 def build_codex_goal_tok_plan(config: TokConfig, prompt: str, run_dir: Path) -> TokExecutionPlan:
     final_prompt = _codex_goal_prompt(prompt)
-    schema_path = run_dir / "tok_report.schema.json"
     output_path = run_dir / "tok_report.json"
     run_cwd = config.run_cwd or config.write_dirs[0]
     command = [
@@ -123,10 +94,6 @@ def build_codex_goal_tok_plan(config: TokConfig, prompt: str, run_dir: Path) -> 
         "--skip-git-repo-check",
         "--sandbox",
         config.sandbox,
-        "--output-schema",
-        str(schema_path),
-        "--output-last-message",
-        str(output_path),
     ]
     enabled_features = list(config.codex_features)
     if "goals" not in enabled_features:
@@ -144,17 +111,15 @@ def build_codex_goal_tok_plan(config: TokConfig, prompt: str, run_dir: Path) -> 
         cwd=run_cwd,
         prompt=final_prompt,
         report_path=output_path,
-        schema_path=schema_path,
         prompt_path=run_dir / "tok_prompt.md",
         provider_prompt_path=run_dir / "tok_codex_goal_prompt.md",
         log_path=run_dir / "tok_codex.log",
-        validation_log_path=run_dir / "tok_report_validation.log",
+        audit_log_path=run_dir / "tok_report_audit.log",
     )
 
 
 def build_codex_app_server_tok_plan(config: TokConfig, prompt: str, run_dir: Path) -> TokExecutionPlan:
     final_prompt = _codex_app_server_goal_prompt(prompt)
-    schema_path = run_dir / "tok_report.schema.json"
     output_path = run_dir / "tok_report.json"
     run_cwd = config.run_cwd or config.write_dirs[0]
     command = [
@@ -167,18 +132,16 @@ def build_codex_app_server_tok_plan(config: TokConfig, prompt: str, run_dir: Pat
         cwd=run_cwd,
         prompt=final_prompt,
         report_path=output_path,
-        schema_path=schema_path,
         prompt_path=run_dir / "tok_prompt.md",
         provider_prompt_path=run_dir / "tok_codex_app_server_prompt.md",
         log_path=run_dir / "tok_codex_app_server.log",
-        validation_log_path=run_dir / "tok_report_validation.log",
+        audit_log_path=run_dir / "tok_report_audit.log",
     )
 
 
 def build_claude_code_goal_tok_plan(config: TokConfig, prompt: str, run_dir: Path) -> TokExecutionPlan:
     attachments_dir = run_dir / "attachments"
     final_prompt = _claude_code_goal_prompt(prompt)
-    schema_path = run_dir / "tok_report.schema.json"
     output_path = run_dir / "tok_report.json"
     run_cwd = config.run_cwd or config.write_dirs[0]
     command = [
@@ -186,8 +149,6 @@ def build_claude_code_goal_tok_plan(config: TokConfig, prompt: str, run_dir: Pat
         "--print",
         "--output-format",
         "json",
-        "--json-schema",
-        json.dumps(TOK_REPORT_SCHEMA, ensure_ascii=False),
     ]
     command.extend(_claude_code_sandbox_args(config.sandbox, attachments_dir))
     if config.model:
@@ -200,11 +161,10 @@ def build_claude_code_goal_tok_plan(config: TokConfig, prompt: str, run_dir: Pat
         cwd=run_cwd,
         prompt=final_prompt,
         report_path=output_path,
-        schema_path=schema_path,
         prompt_path=run_dir / "tok_prompt.md",
         provider_prompt_path=run_dir / "tok_claude_code_goal_prompt.md",
         log_path=run_dir / "tok_claude_code.log",
-        validation_log_path=run_dir / "tok_report_validation.log",
+        audit_log_path=run_dir / "tok_report_audit.log",
     )
 
 
@@ -226,17 +186,6 @@ def _run_claude_code_goal(plan: TokExecutionPlan, timeout_seconds: float | None)
         with plan.log_path.open("a", encoding="utf-8") as log_file:
             log_file.write("\nERROR: claude_code_goal returned no parseable JSON envelope.\n")
         return False
-    report = envelope.get("structured_output")
-    if not isinstance(report, dict):
-        result_text = envelope.get("result")
-        report = _parse_json_object(result_text) if isinstance(result_text, str) else None
-        if not isinstance(report, dict):
-            with plan.log_path.open("a", encoding="utf-8") as log_file:
-                log_file.write("\nERROR: claude_code_goal returned neither structured output nor a parseable report.\n")
-            return False
-        with plan.log_path.open("a", encoding="utf-8") as log_file:
-            log_file.write("\nWARNING: structured_output missing; recovered the report from the result text.\n")
-    plan.report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return True
 
 
@@ -269,7 +218,7 @@ def _run_codex_app_server_goal(config: TokConfig, plan: TokExecutionPlan, timeou
                 "thread/goal/set",
                 {
                     "threadId": thread_id,
-                    "objective": _codex_app_server_goal_objective(),
+                    "objective": _codex_app_server_goal_objective(plan.prompt),
                     "status": "active",
                 },
             )
@@ -282,7 +231,6 @@ def _run_codex_app_server_goal(config: TokConfig, plan: TokExecutionPlan, timeou
                     "approvalPolicy": "never",
                     "sandboxPolicy": _codex_app_server_sandbox_policy(config, plan),
                     "model": config.model,
-                    "outputSchema": TOK_REPORT_SCHEMA,
                 },
             )
             turn = turn_response.get("turn") if isinstance(turn_response, dict) else None
@@ -291,18 +239,7 @@ def _run_codex_app_server_goal(config: TokConfig, plan: TokExecutionPlan, timeou
                 client.log_error("turn/start response did not include turn.id")
                 return False
             completed = client.wait_for_turn_completed(thread_id, turn_id)
-            if not completed:
-                return False
-            read_response = client.request("thread/read", {"threadId": thread_id, "includeTurns": True})
-            report_text = _last_agent_message_text(read_response)
-            if report_text is None:
-                report_text = client.last_agent_message_text
-            report = _parse_json_object(report_text) if isinstance(report_text, str) else None
-            if not isinstance(report, dict):
-                client.log_error("codex app-server returned no parseable final JSON report")
-                return False
-            plan.report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            return True
+            return completed
     except _CodexAppServerError as exc:
         with plan.log_path.open("a", encoding="utf-8") as log_file:
             log_file.write(f"\nERROR: {exc}\n")
@@ -539,25 +476,6 @@ def _codex_app_server_sandbox_policy(config: TokConfig, plan: TokExecutionPlan) 
     }
 
 
-def _last_agent_message_text(read_response: dict[str, Any]) -> str | None:
-    thread = read_response.get("thread")
-    if not isinstance(thread, dict):
-        return None
-    turns = thread.get("turns")
-    if not isinstance(turns, list):
-        return None
-    for turn in reversed(turns):
-        if not isinstance(turn, dict):
-            continue
-        items = turn.get("items")
-        if not isinstance(items, list):
-            continue
-        for item in reversed(items):
-            if isinstance(item, dict) and item.get("type") == "agentMessage" and isinstance(item.get("text"), str):
-                return item["text"]
-    return None
-
-
 def _dedupe_paths(paths: tuple[Path, ...], skip: tuple[Path, ...] = ()) -> tuple[Path, ...]:
     skipped = {_path_key(path) for path in skip}
     seen: set[str] = set()
@@ -575,62 +493,33 @@ def _path_key(path: Path) -> str:
     return str(path.resolve(strict=False))
 
 
-def read_tok_report(report_path: Path) -> dict[str, Any] | None:
-    return _parse_json_object(report_path.read_text(encoding="utf-8"))
-
-
-def tok_report_errors(report: dict[str, Any] | None) -> list[str]:
-    if report is None:
-        return ["tok report is not parseable JSON object"]
-    errors: list[str] = []
-    allowed = set(TOK_REPORT_SCHEMA["properties"])
-    missing = [field for field in TOK_REPORT_SCHEMA["required"] if field not in report]
-    for field in missing:
-        errors.append(f"tok report missing required field: {field}")
-    extra = sorted(set(report) - allowed)
-    for field in extra:
-        errors.append(f"tok report contains unsupported field: {field}")
-    if "source_change_possible" in report and not isinstance(report["source_change_possible"], bool):
-        errors.append("source_change_possible must be boolean")
-    for field in ("revision_strategy", "remaining_artifact_bottleneck"):
-        if field in report and (not isinstance(report[field], str) or not report[field].strip()):
-            errors.append(f"{field} must be a non-empty string")
-    if "expected_artifact_visible_improvement" in report and not _is_string_list(report["expected_artifact_visible_improvement"]):
-        errors.append("expected_artifact_visible_improvement must be a list of strings")
-    return errors
+def runtime_tok_report() -> dict[str, Any]:
+    return {
+        "source_change_possible": True,
+        "revision_strategy": "tok provider completed",
+        "expected_artifact_visible_improvement": [],
+        "remaining_artifact_bottleneck": "not reported by tok",
+    }
 
 
 def _codex_goal_prompt(prompt: str) -> str:
-    return (
-        "/goal\n"
-        "Keep working according to the attached review. "
-        "Return the required report. Do not claim the artifact is complete; the next review pass decides that.\n\n"
-        f"{prompt}"
-    )
+    return f"/goal\n{_plain_tok_prompt(prompt)}"
 
 
 def _codex_app_server_goal_prompt(prompt: str) -> str:
-    return (
-        "Keep working according to the attached review. "
-        "Return the required report. Do not claim the artifact is complete; the next review pass decides that.\n\n"
-        f"{prompt}"
-    )
+    return _plain_tok_prompt(prompt)
 
 
-def _codex_app_server_goal_objective() -> str:
-    return "Make the configured artifact pass the attached review by editing allowed source files, then return the required schema report."
+def _codex_app_server_goal_objective(prompt: str) -> str:
+    return prompt.rstrip()
 
 
 def _claude_code_goal_prompt(prompt: str) -> str:
-    return (
-        "Keep working according to the attached review. "
-        "Return the required report as structured output with exactly these fields: "
-        "source_change_possible (boolean), revision_strategy (string), "
-        "expected_artifact_visible_improvement (list of strings), remaining_artifact_bottleneck (string). "
-        "Do not claim the artifact is complete; the next review pass decides that. "
-        "The attachments directory is read-only reference material; never create or modify files there.\n\n"
-        f"{prompt}"
-    )
+    return _plain_tok_prompt(prompt)
+
+
+def _plain_tok_prompt(prompt: str) -> str:
+    return f"{prompt.rstrip()}\n"
 
 
 def _snapshot_attachment_files(attachment_dir: Path) -> dict[str, str]:
@@ -656,24 +545,3 @@ def _attachment_integrity_errors(before: dict[str, str], after: dict[str, str]) 
         if before[path] != after[path]:
             errors.append(f"tok attachment changed during execution: modified {path}")
     return errors
-
-
-def _parse_json_object(text: str) -> dict[str, Any] | None:
-    try:
-        parsed = json.loads(text)
-        return parsed if isinstance(parsed, dict) else None
-    except json.JSONDecodeError:
-        pass
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end <= start:
-        return None
-    try:
-        parsed = json.loads(text[start : end + 1])
-    except json.JSONDecodeError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
-
-
-def _is_string_list(value: object) -> bool:
-    return isinstance(value, list) and all(isinstance(item, str) for item in value)

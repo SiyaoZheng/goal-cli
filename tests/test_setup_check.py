@@ -25,17 +25,17 @@ class SetupCheckTests(unittest.TestCase):
             self.assertEqual(self._detail(checks, "static_setup"), "static setup ready for goal-cli run")
             self.assertIn("not proven", self._detail(checks, "one_click_artifact_loop"))
 
-    def test_doctor_fails_when_codex_exec_lacks_schema_output(self) -> None:
+    def test_doctor_fails_when_codex_exec_lacks_goal_feature(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             self._write_project(root)
-            self._install_fake_codex(root, include_schema_flags=False)
+            self._install_fake_codex(root, include_goal_flags=False)
 
             checks = run_doctor(load_config(root / "goal.toml"))
 
             self.assertEqual(doctor_exit_code(checks), 1)
-            self.assertIn("does not show --output-schema", self._detail(checks, "codex.exec.--output-schema"))
-            self.assertIn("codex.exec.--output-schema", self._detail(checks, "one_click_artifact_loop"))
+            self.assertIn("does not show --enable", self._detail(checks, "codex.exec.--enable"))
+            self.assertIn("codex.exec.--enable", self._detail(checks, "one_click_artifact_loop"))
 
     def test_doctor_fails_for_missing_producer_binary(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -153,7 +153,7 @@ class SetupCheckTests(unittest.TestCase):
             self.assertEqual(doctor_exit_code(checks), 0, checks)
             self.assertIn("command executable found", self._detail(checks, "tik.command"))
 
-    def test_codex_goal_smoke_uses_temp_workspace_and_validates_report(self) -> None:
+    def test_codex_goal_smoke_uses_temp_workspace_and_edits_source(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             self._write_project(root)
@@ -164,11 +164,11 @@ class SetupCheckTests(unittest.TestCase):
             checks = run_doctor(load_config(root / "goal.toml"), DoctorOptions(smoke_codex_goal=True))
 
             self.assertEqual(doctor_exit_code(checks), 0, checks)
-            self.assertIn("schema-valid tok report", self._detail(checks, "codex_goal.smoke"))
+            self.assertIn("temporary source change", self._detail(checks, "codex_goal.smoke"))
             self.assertEqual(self._detail(checks, "one_click_artifact_loop"), "ready for one-prompt goal-cli run")
             self.assertEqual(project_source.read_text(encoding="utf-8"), before)
 
-    def test_codex_app_server_smoke_uses_temp_workspace_and_validates_report(self) -> None:
+    def test_codex_app_server_smoke_uses_temp_workspace_and_edits_source(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             self._write_project(root, tok_provider="codex_app_server")
@@ -181,7 +181,7 @@ class SetupCheckTests(unittest.TestCase):
             self.assertEqual(doctor_exit_code(checks), 0, checks)
             self.assertIn("codex app-server --help succeeded", self._detail(checks, "codex.app_server.help"))
             self.assertIn("codex app-server supports --stdio", self._detail(checks, "codex.app_server.--stdio"))
-            self.assertIn("schema-valid tok report", self._detail(checks, "codex_app_server.smoke"))
+            self.assertIn("temporary source change", self._detail(checks, "codex_app_server.smoke"))
             self.assertEqual(self._detail(checks, "one_click_artifact_loop"), "ready for one-prompt goal-cli run")
             self.assertEqual(project_source.read_text(encoding="utf-8"), before)
 
@@ -224,7 +224,7 @@ class SetupCheckTests(unittest.TestCase):
             self.assertEqual(self._detail(checks, "one_click_artifact_loop"), "ready for one-prompt goal-cli run")
             self.assertEqual(project_source.read_text(encoding="utf-8"), before)
 
-    def test_claude_code_goal_smoke_uses_temp_workspace_and_validates_report(self) -> None:
+    def test_claude_code_goal_smoke_uses_temp_workspace_and_edits_source(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             self._write_project(root, tok_provider="claude_code_goal")
@@ -239,8 +239,8 @@ class SetupCheckTests(unittest.TestCase):
 
             self.assertEqual(doctor_exit_code(checks), 0, checks)
             self.assertIn("claude found at", self._detail(checks, "claude.binary"))
-            self.assertIn("claude supports --json-schema", self._detail(checks, "claude.--json-schema"))
-            self.assertIn("schema-valid tok report", self._detail(checks, "claude_code_goal.smoke"))
+            self.assertNotIn("claude.--json-schema", [check.name for check in checks])
+            self.assertIn("temporary source change", self._detail(checks, "claude_code_goal.smoke"))
             self.assertEqual(self._detail(checks, "one_click_artifact_loop"), "ready for one-prompt goal-cli run")
             self.assertEqual(project_source.read_text(encoding="utf-8"), before)
             self.assertNotIn("codex.binary", [check.name for check in checks])
@@ -381,13 +381,13 @@ generated_dirs = ["output", "build"]
 '''
         (root / "goal.toml").write_text(config, encoding="utf-8")
 
-    def _install_fake_codex(self, root: Path, include_schema_flags: bool = True, include_ephemeral: bool = True) -> None:
+    def _install_fake_codex(self, root: Path, include_goal_flags: bool = True, include_ephemeral: bool = True) -> None:
         bin_dir = root / "bin"
         bin_dir.mkdir()
         fake_codex = bin_dir / "codex"
-        help_flags = ["--enable", "--add-dir", "--sandbox", "--skip-git-repo-check"]
-        if include_schema_flags:
-            help_flags[:0] = ["--output-schema", "--output-last-message"]
+        help_flags = ["--add-dir", "--sandbox", "--skip-git-repo-check", "--output-last-message"]
+        if include_goal_flags:
+            help_flags.append("--enable")
         if include_ephemeral:
             help_flags.append("--ephemeral")
         help_text = " ".join(help_flags)
@@ -407,13 +407,6 @@ generated_dirs = ["output", "build"]
                     print("--stdio generate-ts generate-json-schema")
                     raise SystemExit(0)
                 if args == ["app-server", "--stdio"]:
-                    report = {{
-                        "source_change_possible": True,
-                        "revision_strategy": "write temporary smoke file through app-server",
-                        "expected_artifact_visible_improvement": ["codex_app_server can emit schema-shaped reports"],
-                        "remaining_artifact_bottleneck": "none for setup smoke"
-                    }}
-
                     def respond(request_id, result):
                         print(json.dumps({{"id": request_id, "result": result}}), flush=True)
 
@@ -432,7 +425,7 @@ generated_dirs = ["output", "build"]
                             assert params["threadId"] == "thread-1"
                             respond(request_id, {{"goal": {{"threadId": "thread-1", "objective": params["objective"], "status": "active"}}}})
                         elif method == "turn/start":
-                            assert params["outputSchema"]["properties"]["source_change_possible"]["type"] == "boolean"
+                            assert "outputSchema" not in params
                             assert "Doctor smoke check for goal-cli setup readiness" in params["input"][0]["text"]
                             Path(params["cwd"], "doctor-smoke.txt").write_text("ok\\n", encoding="utf-8")
                             respond(request_id, {{"turn": {{"id": "turn-1", "status": "inProgress", "items": []}}}})
@@ -440,28 +433,23 @@ generated_dirs = ["output", "build"]
                                 "method": "turn/completed",
                                 "params": {{"threadId": "thread-1", "turn": {{"id": "turn-1", "status": "completed", "items": []}}}}
                             }}), flush=True)
-                        elif method == "thread/read":
-                            respond(request_id, {{"thread": {{"id": "thread-1", "turns": [{{"items": [{{"type": "agentMessage", "id": "agent-1", "text": json.dumps(report), "phase": None, "memoryCitation": None}}]}}]}}}})
                         else:
                             raise SystemExit(f"unexpected method: {{method}}")
                     raise SystemExit(0)
 
-                output_path = Path(args[args.index("--output-last-message") + 1])
                 workspace = Path(args[args.index("-C") + 1])
                 assert args[0] == "exec"
-                if "--output-schema" in args:
-                    schema_path = Path(args[args.index("--output-schema") + 1])
+                if "--enable" in args and "goals" in args:
+                    assert "--output-schema" not in args
+                    assert "--output-last-message" not in args
                     assert "--enable" in args and "goals" in args
-                    assert schema_path.exists()
+                    prompt = sys.stdin.read()
+                    assert prompt.startswith("/goal\\n")
+                    assert "Doctor smoke check for goal-cli setup readiness" in prompt
                     (workspace / "doctor-smoke.txt").write_text("ok\\n", encoding="utf-8")
-                    output_path.write_text(json.dumps({{
-                        "source_change_possible": True,
-                        "revision_strategy": "write temporary smoke file",
-                        "expected_artifact_visible_improvement": ["codex_goal can emit schema-shaped reports"],
-                        "remaining_artifact_bottleneck": "none for setup smoke"
-                    }}) + "\\n", encoding="utf-8")
                     raise SystemExit(0)
 
+                output_path = Path(args[args.index("--output-last-message") + 1])
                 assert "--skip-git-repo-check" in args
                 assert args[args.index("--sandbox") + 1] == "read-only"
                 assert "--ephemeral" in args
@@ -486,7 +474,7 @@ generated_dirs = ["output", "build"]
         bin_dir = root / "claude-bin"
         bin_dir.mkdir()
         fake_claude = bin_dir / "claude"
-        help_flags = ["--print", "--output-format", "--model", "--json-schema", "--add-dir", "--permission-mode"]
+        help_flags = ["--print", "--output-format", "--model", "--add-dir", "--permission-mode"]
         if include_disallowed_tools:
             help_flags.append("--disallowedTools")
         help_text = " ".join(help_flags)
@@ -506,22 +494,15 @@ generated_dirs = ["output", "build"]
                 assert "--print" in args
                 assert args[args.index("--output-format") + 1] == "json"
 
-                if "--json-schema" in args:
-                    schema = json.loads(args[args.index("--json-schema") + 1])
-                    assert "source_change_possible" in schema["properties"]
+                if "--permission-mode" in args:
+                    assert "--json-schema" not in args
                     assert args[args.index("--permission-mode") + 1] == "acceptEdits"
                     add_dirs = [args[index + 1] for index, arg in enumerate(args) if arg == "--add-dir"]
                     assert any(path.endswith("attachments") for path in add_dirs)
                     prompt = sys.stdin.read()
                     assert "Doctor smoke check for goal-cli setup readiness" in prompt
                     (Path.cwd() / "doctor-smoke.txt").write_text("ok\\n", encoding="utf-8")
-                    report = {{
-                        "source_change_possible": True,
-                        "revision_strategy": "write temporary smoke file",
-                        "expected_artifact_visible_improvement": ["claude_code_goal can emit schema-shaped reports"],
-                        "remaining_artifact_bottleneck": "none for setup smoke"
-                    }}
-                    print(json.dumps({{"type": "result", "subtype": "success", "is_error": False, "result": "done", "structured_output": report}}))
+                    print(json.dumps({{"type": "result", "subtype": "success", "is_error": False, "result": "done"}}))
                     raise SystemExit(0)
 
                 disallowed = args[args.index("--disallowedTools") + 1]

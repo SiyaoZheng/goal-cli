@@ -62,12 +62,12 @@ After setup, the project should have:
 Only after those checks should a real repair run start:
 
 ```bash
-goal-cli run --max-minutes 30
+goal-cli run --max-minutes 600
 ```
 
 For unattended progress, install the per-user OS timer instead of leaving a
 foreground loop running:
 
 ```bash
-goal-cli heartbeat install --every-minutes 30 --max-minutes 30
+goal-cli heartbeat install --every-minutes 30 --max-minutes 600
 ```
