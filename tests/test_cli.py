@@ -66,7 +66,7 @@ class CliTests(unittest.TestCase):
         help_text = output.getvalue()
         self.assertIn("--timeout-seconds", help_text)
         self.assertIn("--smoke-timeout-seconds", help_text)
-        self.assertIn("except optional Codex", help_text)
+        self.assertIn("except optional provider", help_text)
         self.assertIn("smoke checks", help_text)
 
     def test_cleanup_help_exposes_orphan_cleanup_boundary(self) -> None:

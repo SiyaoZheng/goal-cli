@@ -74,7 +74,11 @@ class NoMistakesGate:
             return _unavailable("no_mistakes_no_git_repository", "project is not inside a Git repository")
 
         log_path = run_dir / f"no_mistakes_{phase}.log"
-        if _branch_is_default(self.config, repo, prepared.branch, deadline):
+        try:
+            branch_is_default = _branch_is_default(self.config, repo, prepared.branch, deadline)
+        except _NoMistakesBudgetExhausted as exc:
+            return _budget_exhausted(str(exc), repo, prepared.branch, prepared.commit, log_path)
+        if branch_is_default:
             detail = (
                 "no-mistakes axi run skipped on the default branch; goal-cli "
                 "kept the current branch as the single-person mainline and "

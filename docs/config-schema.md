@@ -44,7 +44,7 @@ accepted from source edits alone.
 
 ## Tik
 
-Tik has four public modes.
+Tik has five public modes.
 
 ```toml
 [tik]
@@ -58,6 +58,16 @@ checks. The command receives:
 - `GOAL_ARTIFACT`
 - `GOAL_TIK_PROMPT`
 - `GOAL_RUN_DIR`
+
+```toml
+[tik]
+provider = "checklist"
+command = "python3 scripts/checklist_review.py"
+```
+
+Use `checklist` for command-backed checklist review providers. It has the same
+command contract as `oracle`, but gives checklist-oriented tik output a distinct
+provider type in ledgers, state, and multi-provider configurations.
 
 ```toml
 [tik]
@@ -128,6 +138,48 @@ directories in the workspace, and with `Write`, `Edit`, `NotebookEdit`, and
 `Bash` explicitly disallowed so the pass is read-only. The memo is extracted
 from the `result` field of the `--output-format json` envelope.
 
+### Multiple Tik Providers
+
+Tik can run several providers in parallel. Keep shared prompt and verdict
+schema under `[tik]`, then configure each provider with `[[tik.providers]]`:
+
+```toml
+[tik]
+timeout_seconds = 1800
+max_file_size_bytes = 25000000
+
+[[tik.providers]]
+label = "codex"
+provider = "codex_file"
+model = "optional model override"
+
+[[tik.providers]]
+label = "claude"
+provider = "claude_code_file"
+model = "optional model override"
+
+[[tik.providers]]
+label = "checklist"
+provider = "checklist"
+command = "python3 scripts/checklist_review.py"
+
+[tik.prompt]
+text = "Review only the finished thing at {artifact_path}."
+```
+
+Each provider inherits top-level tik defaults unless the provider table
+overrides them. Supported override fields are the same as single-provider tik
+fields: `provider`, `label`, `model`, `command`, `skill`, `base_url`, `binary`,
+`engine`, `timeout`, `timeout_seconds`, `max_file_size_bytes`,
+`max_output_tokens`, `store`, and `prompt`.
+
+The heartbeat waits for every configured tik provider. If any provider fails,
+returns unparseable JSON, or reviews the wrong artifact hash, the heartbeat
+blocks before tok. If all providers return usable verdicts, goal-cli writes one
+aggregate `tik.md` handoff for tok. The aggregate verdict is ready only when
+every provider is ready; otherwise the provider review text is carried forward
+as Markdown for tok.
+
 For `codex_file` and `claude_code_file`, if the configured tik prompt starts
 with a slash skill such as `/apsr-review`, goal-cli keeps that slash command as
 the first stdin line for the reviewing CLI. For `api`, use `tik.skill` instead.
@@ -137,20 +189,14 @@ Tik output must contain a JSON object with the configured verdict fields:
 ```toml
 [tik.verdict]
 ready_field = "artifact_ready"
-blockers_field = "blocking_objections"
-required_fields = ["artifact_ready", "blocking_objections"]
-fingerprint_fields = ["blocking_objections", "central_bottleneck"]
+required_fields = ["artifact_ready"]
 ```
 
 The default verdict shape is:
 
 ```json
 {
-  "artifact_ready": false,
-  "central_bottleneck": "one sentence",
-  "blocking_objections": [],
-  "required_next_artifact_changes": [],
-  "current_artifact_sha256": "optional current artifact sha256"
+  "artifact_ready": false
 }
 ```
 
@@ -160,15 +206,19 @@ Freshness fields are optional but enforced when present. If a verdict says
 `reviewed_artifact_sha256` does not match the runtime artifact hash, the run
 records `blocked_stale_tik_review` and asks for a fresh tik pass before tok.
 
-Each tik pass writes `tik.md` in the run directory. That Markdown ledger is the
-machine handoff to tok: it includes artifact metadata, the raw tik memo, and the
-parsed tik verdict JSON. Tok normally receives the review as a file attachment
-through `{tik_review_path}` rather than inline prompt text, so long reviews do
-not inflate the `/goal` prompt.
+Each tik pass writes `tik.md` in the run directory. In single-provider mode,
+that file contains the provider review with the control JSON stripped out. In
+multi-provider mode, provider-specific ledgers are written beside it, and
+`tik.md` contains the aggregate Markdown review text. The parsed JSON is private
+runtime state in `tik_verdict.json`; it decides whether tok can run, but it is
+not the tok handoff. Tok normally receives the Markdown review as a file
+attachment through `{tik_review_path}` rather than inline prompt text, so long
+reviews do not inflate the `/goal` prompt.
 
 ## Tok
 
-Tok has two public modes: `codex_goal` and `claude_code_goal`.
+Tok has three public modes: `codex_goal`, `codex_app_server`, and
+`claude_code_goal`.
 
 ```toml
 [tok]
@@ -198,6 +248,23 @@ when the producer or diagnostics must be launched from the project root.
 
 ```toml
 [tok]
+provider = "codex_app_server"
+write_dirs = ["src", "data"]
+run_cwd = "."
+runtime_write_dirs = ["output", "build", "logs"]
+sandbox = "workspace-write"
+```
+
+`codex_app_server` launches `codex app-server --stdio`, starts an ephemeral
+thread, sets a real thread goal through `thread/goal/set`, and runs the work
+pass through `turn/start` with the same tok report schema passed as
+`outputSchema`. The runtime waits for `turn/completed`, reads the final agent
+message from `thread/read`, and writes the parsed report to `tok_report.json`.
+It uses the same attachment integrity check and source-change audit as
+`codex_goal`.
+
+```toml
+[tok]
 provider = "claude_code_goal"
 write_dirs = ["src", "data"]
 run_cwd = "."
@@ -211,7 +278,8 @@ through `--json-schema`; the runtime reads the validated report from the
 `tok_report.json`. The same `write_dirs`, `run_cwd`, and `runtime_write_dirs`
 semantics apply: the working directory is `run_cwd`, and every other write
 scope plus the run attachments directory is granted through `--add-dir`.
-`codex_features` is Codex-specific and ignored for this provider.
+`codex_features` only affects the `codex_goal` exec path; it is ignored for
+`codex_app_server` and `claude_code_goal`.
 
 The `sandbox` field maps onto Claude Code permissions:
 
@@ -430,9 +498,9 @@ checks:
 - artifact, state, and run directory creatability;
 - configured producer command availability where the shell command is statically
   knowable;
-- oracle tik command availability where applicable;
-- Codex CLI availability when `tok.provider = "codex_goal"` or
-  `tik.provider = "codex_file"`;
+- oracle/checklist tik command availability where applicable;
+- Codex CLI availability when `tok.provider = "codex_goal"`,
+  `tok.provider = "codex_app_server"`, or `tik.provider = "codex_file"`;
 - Claude Code CLI availability and `claude` flag support (`--print`,
   `--output-format`, `--disallowedTools`, `--model`, plus `--json-schema`,
   `--add-dir`, and `--permission-mode` when `tok.provider =
@@ -443,6 +511,8 @@ checks:
 - `codex exec` support for `--output-schema`, `--output-last-message`,
   `--enable`, `--add-dir`, `--sandbox`, and `--ephemeral` when
   `tik.provider = "codex_file"`;
+- `codex app-server --help` support for `--stdio` when `tok.provider =
+  "codex_app_server"`;
 - API tik `openai` package and API key readiness when `tik.provider = "api"`.
 
 The default summary reports `static_setup`. If it is ready, `goal-cli run` has
@@ -459,6 +529,17 @@ The smoke check starts a minimal internal Codex `/goal` in a temporary writable
 directory, asks it to create a temporary source file, and validates the
 schema-shaped tok report. It does not touch project sources.
 
+For `tok.provider = "codex_app_server"`, run the Codex app-server smoke
+instead:
+
+```bash
+goal-cli doctor --smoke-codex-app-server
+```
+
+That smoke check uses `codex app-server --stdio`, creates an ephemeral thread,
+sets a thread goal, starts a schema-constrained turn, and validates the same
+tok report contract in a temporary workspace.
+
 For `tok.provider = "claude_code_goal"`, run the Claude Code tok smoke instead:
 
 ```bash
@@ -471,6 +552,7 @@ Combine the tok and tik smoke flags that match the configured providers:
 
 ```bash
 goal-cli doctor --smoke-codex-goal --smoke-codex-file-tik
+goal-cli doctor --smoke-codex-app-server --smoke-codex-file-tik
 goal-cli doctor --smoke-claude-code-goal --smoke-claude-code-file-tik
 ```
 

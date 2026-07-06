@@ -1,0 +1,15 @@
+{
+  "RQ-001": {
+    "pass": true,
+    "note": "The research question is stated as one interrogative sentence in the introduction."
+  },
+  "TITLE-002": true,
+  "FINAL-001": {
+    "pass": false,
+    "note": "A real reader did not find the answer convincing yet."
+  },
+  "ID-006": {
+    "status": "na",
+    "note": "The paper does not use an IV design."
+  }
+}

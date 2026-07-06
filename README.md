@@ -229,10 +229,37 @@ generated_dirs = ["outputs", "build", "logs"]
 max_blocker_repeats = 3
 ```
 
-Swap `codex_file` for `claude_code_file` and `codex_goal` for
-`claude_code_goal` to run the same loop through Claude Code instead of Codex;
+To run several reviewers at once, move provider-specific fields into
+`[[tik.providers]]`. The heartbeat runs them in parallel and hands tok one
+aggregate `tik.md` containing every provider result.
+
+```toml
+[tik]
+timeout_seconds = 1800
+
+[[tik.providers]]
+label = "codex"
+provider = "codex_file"
+
+[[tik.providers]]
+label = "claude"
+provider = "claude_code_file"
+
+[[tik.providers]]
+label = "checklist"
+provider = "checklist"
+command = "python3 scripts/checklist_review.py"
+```
+
+Use `codex_app_server` instead of `codex_goal` when tok should drive Codex
+through `codex app-server --stdio` rather than `codex exec`. Swap
+`codex_file` for `claude_code_file` and `codex_goal` for `claude_code_goal` to
+run the same loop through Claude Code instead of Codex;
 [`examples/scientificity-claude/goal.toml`](examples/scientificity-claude/goal.toml)
 is the all-Claude version of this setup.
+
+Use `checklist` for command-backed checklist reviews that should appear as
+their own tik provider in ledgers and state.
 
 The important boundary is simple: the fixing agent edits source, but the final
 result has to be rebuilt and checked before the work counts as done.
@@ -302,7 +329,8 @@ you are improving reusable examples or docs in this repository.
 
 `goal-cli` is early local tooling, currently version `0.1.0`.
 
-No license file is included yet. Add one before accepting external
-contributions or using this as a dependency in another public project.
+The project is distributed under the [MIT License](LICENSE). See
+[SECURITY.md](SECURITY.md) for vulnerability reporting and
+[CHANGELOG.md](CHANGELOG.md) for release notes.
 
 </details>

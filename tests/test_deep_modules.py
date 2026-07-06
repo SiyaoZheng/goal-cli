@@ -198,10 +198,7 @@ class PassingProviderAdapters:
             textwrap.dedent(
                 """
                 {
-                  "artifact_ready": true,
-                  "central_bottleneck": "",
-                  "blocking_objections": [],
-                  "required_next_artifact_changes": []
+                  "artifact_ready": true
                 }
                 """
             ).strip()

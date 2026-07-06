@@ -2,6 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import queue
+import signal
+import subprocess
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -57,7 +63,7 @@ class TokExecutionResult:
 
 
 def execute_tok(config: TokConfig, prompt: str, run_dir: Path, timeout_seconds: float | None = None) -> TokExecutionResult:
-    if config.provider not in {"codex_goal", "claude_code_goal"}:
+    if config.provider not in {"codex_goal", "codex_app_server", "claude_code_goal"}:
         raise ValueError(f"unsupported tok provider: {config.provider}")
 
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -71,6 +77,8 @@ def execute_tok(config: TokConfig, prompt: str, run_dir: Path, timeout_seconds: 
     attachment_snapshot = _snapshot_attachment_files(attachment_dir)
     if config.provider == "claude_code_goal":
         plan = build_claude_code_goal_tok_plan(config, prompt, run_dir)
+    elif config.provider == "codex_app_server":
+        plan = build_codex_app_server_tok_plan(config, prompt, run_dir)
     else:
         plan = build_codex_goal_tok_plan(config, prompt, run_dir)
     plan.prompt_path.write_text(prompt, encoding="utf-8")
@@ -79,6 +87,8 @@ def execute_tok(config: TokConfig, prompt: str, run_dir: Path, timeout_seconds: 
 
     if config.provider == "claude_code_goal":
         ok = _run_claude_code_goal(plan, timeout_seconds)
+    elif config.provider == "codex_app_server":
+        ok = _run_codex_app_server_goal(config, plan, timeout_seconds)
     else:
         ok = run_command_logged(list(plan.command), plan.cwd, plan.log_path, plan.prompt, timeout_seconds=timeout_seconds)
     attachment_errors = _attachment_integrity_errors(attachment_snapshot, _snapshot_attachment_files(attachment_dir))
@@ -138,6 +148,29 @@ def build_codex_goal_tok_plan(config: TokConfig, prompt: str, run_dir: Path) -> 
         prompt_path=run_dir / "tok_prompt.md",
         provider_prompt_path=run_dir / "tok_codex_goal_prompt.md",
         log_path=run_dir / "tok_codex.log",
+        validation_log_path=run_dir / "tok_report_validation.log",
+    )
+
+
+def build_codex_app_server_tok_plan(config: TokConfig, prompt: str, run_dir: Path) -> TokExecutionPlan:
+    final_prompt = _codex_app_server_goal_prompt(prompt)
+    schema_path = run_dir / "tok_report.schema.json"
+    output_path = run_dir / "tok_report.json"
+    run_cwd = config.run_cwd or config.write_dirs[0]
+    command = [
+        "codex",
+        "app-server",
+        "--stdio",
+    ]
+    return TokExecutionPlan(
+        command=tuple(command),
+        cwd=run_cwd,
+        prompt=final_prompt,
+        report_path=output_path,
+        schema_path=schema_path,
+        prompt_path=run_dir / "tok_prompt.md",
+        provider_prompt_path=run_dir / "tok_codex_app_server_prompt.md",
+        log_path=run_dir / "tok_codex_app_server.log",
         validation_log_path=run_dir / "tok_report_validation.log",
     )
 
@@ -207,6 +240,324 @@ def _run_claude_code_goal(plan: TokExecutionPlan, timeout_seconds: float | None)
     return True
 
 
+def _run_codex_app_server_goal(config: TokConfig, plan: TokExecutionPlan, timeout_seconds: float | None) -> bool:
+    deadline = time.monotonic() + timeout_seconds if timeout_seconds and timeout_seconds > 0 else None
+    try:
+        with _JsonRpcStdioClient(plan.command, plan.cwd, plan.log_path, deadline) as client:
+            client.request(
+                "initialize",
+                {"clientInfo": {"name": "goal-cli", "version": "0"}, "capabilities": {}},
+            )
+            thread_start: dict[str, Any] = {
+                "cwd": str(plan.cwd),
+                "approvalPolicy": "never",
+                "sandbox": config.sandbox,
+                "ephemeral": True,
+                "serviceName": "goal-cli",
+                "threadSource": "goal-cli-tok",
+            }
+            if config.model:
+                thread_start["model"] = config.model
+            thread_response = client.request("thread/start", thread_start)
+            thread = thread_response.get("thread") if isinstance(thread_response, dict) else None
+            thread_id = thread.get("id") if isinstance(thread, dict) else None
+            if not isinstance(thread_id, str) or not thread_id:
+                client.log_error("thread/start response did not include thread.id")
+                return False
+
+            client.request(
+                "thread/goal/set",
+                {
+                    "threadId": thread_id,
+                    "objective": _codex_app_server_goal_objective(),
+                    "status": "active",
+                },
+            )
+            turn_response = client.request(
+                "turn/start",
+                {
+                    "threadId": thread_id,
+                    "input": [{"type": "text", "text": plan.prompt, "text_elements": []}],
+                    "cwd": str(plan.cwd),
+                    "approvalPolicy": "never",
+                    "sandboxPolicy": _codex_app_server_sandbox_policy(config, plan),
+                    "model": config.model,
+                    "outputSchema": TOK_REPORT_SCHEMA,
+                },
+            )
+            turn = turn_response.get("turn") if isinstance(turn_response, dict) else None
+            turn_id = turn.get("id") if isinstance(turn, dict) else None
+            if not isinstance(turn_id, str) or not turn_id:
+                client.log_error("turn/start response did not include turn.id")
+                return False
+            completed = client.wait_for_turn_completed(thread_id, turn_id)
+            if not completed:
+                return False
+            read_response = client.request("thread/read", {"threadId": thread_id, "includeTurns": True})
+            report_text = _last_agent_message_text(read_response)
+            if report_text is None:
+                report_text = client.last_agent_message_text
+            report = _parse_json_object(report_text) if isinstance(report_text, str) else None
+            if not isinstance(report, dict):
+                client.log_error("codex app-server returned no parseable final JSON report")
+                return False
+            plan.report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            return True
+    except _CodexAppServerError as exc:
+        with plan.log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(f"\nERROR: {exc}\n")
+        return False
+
+
+class _CodexAppServerError(RuntimeError):
+    pass
+
+
+class _JsonRpcStdioClient:
+    def __init__(self, command: tuple[str, ...], cwd: Path, log_path: Path, deadline: float | None) -> None:
+        self.command = command
+        self.cwd = cwd
+        self.log_path = log_path
+        self.deadline = deadline
+        self.process: subprocess.Popen[str] | None = None
+        self.lines: queue.Queue[tuple[str, str | None]] = queue.Queue()
+        self.reader_threads: list[threading.Thread] = []
+        self.next_id = 1
+        self.pending: dict[int, dict[str, Any]] = {}
+        self.notifications: list[dict[str, Any]] = []
+        self.last_agent_message_text: str | None = None
+
+    def __enter__(self) -> "_JsonRpcStdioClient":
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.log_path.open("w", encoding="utf-8") as log_file:
+            log_file.write(f"$ {' '.join(self.command)}\n# cwd: {self.cwd}\n\n")
+        try:
+            self.process = subprocess.Popen(
+                list(self.command),
+                cwd=self.cwd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            raise _CodexAppServerError(f"failed to start codex app-server: {exc}") from exc
+        assert self.process.stdout is not None
+        assert self.process.stderr is not None
+        for name, stream in (("stdout", self.process.stdout), ("stderr", self.process.stderr)):
+            thread = threading.Thread(target=self._read_stream, args=(name, stream), daemon=True)
+            thread.start()
+            self.reader_threads.append(thread)
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        if self.process is None:
+            return
+        if self.process.poll() is None:
+            try:
+                os.killpg(self.process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                self.process.wait(timeout=5)
+        for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+            if stream is None:
+                continue
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+    def request(self, method: str, params: dict[str, Any] | None) -> dict[str, Any]:
+        request_id = self.next_id
+        self.next_id += 1
+        message: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id, "method": method}
+        if params is not None:
+            message["params"] = params
+        self._send(message)
+        while True:
+            if request_id in self.pending:
+                response = self.pending.pop(request_id)
+                if "error" in response:
+                    raise _CodexAppServerError(f"{method} failed: {response['error']}")
+                result = response.get("result", {})
+                return result if isinstance(result, dict) else {"value": result}
+            self._read_next_message()
+
+    def wait_for_turn_completed(self, thread_id: str, turn_id: str) -> bool:
+        while True:
+            for notification in self.notifications:
+                if notification.get("method") != "turn/completed":
+                    continue
+                params = notification.get("params")
+                if not isinstance(params, dict) or params.get("threadId") != thread_id:
+                    continue
+                turn = params.get("turn")
+                if not isinstance(turn, dict) or turn.get("id") != turn_id:
+                    continue
+                if turn.get("status") == "completed":
+                    return True
+                self.log_error(f"turn completed with non-success status: {turn.get('status')}")
+                return False
+            self._read_next_message()
+
+    def log_error(self, message: str) -> None:
+        with self.log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(f"\nERROR: {message}\n")
+
+    def _send(self, message: dict[str, Any]) -> None:
+        if self.process is None or self.process.stdin is None:
+            raise _CodexAppServerError("codex app-server process is not running")
+        self._log_json(">", message)
+        try:
+            self.process.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
+            self.process.stdin.flush()
+        except OSError as exc:
+            raise _CodexAppServerError(f"failed to write to codex app-server: {exc}") from exc
+
+    def _read_next_message(self) -> None:
+        if self.process is None:
+            raise _CodexAppServerError("codex app-server process is not running")
+        while True:
+            timeout = self._queue_timeout()
+            try:
+                stream, line = self.lines.get(timeout=timeout)
+            except queue.Empty:
+                if self.process.poll() is not None:
+                    raise _CodexAppServerError(f"codex app-server exited with code {self.process.returncode}")
+                self._remaining_timeout()
+                continue
+            if line is None:
+                if stream == "stdout" and self.process.poll() is not None:
+                    raise _CodexAppServerError(f"codex app-server exited with code {self.process.returncode}")
+                continue
+            if stream == "stderr":
+                self._log_raw("!", line)
+                continue
+            self._log_raw("<", line)
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                self.log_error(f"codex app-server emitted non-JSON stdout line: {line.strip()}")
+                continue
+            self._handle_message(message)
+            return
+
+    def _read_stream(self, name: str, stream: Any) -> None:
+        try:
+            for line in stream:
+                self.lines.put((name, line))
+        finally:
+            self.lines.put((name, None))
+
+    def _handle_message(self, message: dict[str, Any]) -> None:
+        if "id" in message and ("result" in message or "error" in message):
+            try:
+                response_id = int(message["id"])
+            except (TypeError, ValueError):
+                self.log_error(f"codex app-server returned non-integer response id: {message.get('id')!r}")
+                return
+            self.pending[response_id] = message
+            return
+        method = message.get("method")
+        if isinstance(method, str) and "id" in message:
+            self._deny_server_request(message)
+            return
+        if isinstance(method, str):
+            self.notifications.append(message)
+            self._remember_agent_message(message)
+            return
+        self.log_error(f"codex app-server emitted unknown message: {message}")
+
+    def _deny_server_request(self, message: dict[str, Any]) -> None:
+        response = {
+            "jsonrpc": "2.0",
+            "id": message.get("id"),
+            "error": {
+                "code": -32000,
+                "message": "goal-cli tok app-server client does not support interactive approvals or input requests",
+            },
+        }
+        self._send(response)
+
+    def _remember_agent_message(self, message: dict[str, Any]) -> None:
+        method = message.get("method")
+        params = message.get("params")
+        if method != "item/completed" or not isinstance(params, dict):
+            return
+        item = params.get("item")
+        if isinstance(item, dict) and item.get("type") == "agentMessage" and isinstance(item.get("text"), str):
+            self.last_agent_message_text = item["text"]
+
+    def _remaining_timeout(self) -> float | None:
+        if self.deadline is None:
+            return None
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise _CodexAppServerError("codex app-server timed out")
+        return remaining
+
+    def _queue_timeout(self) -> float:
+        remaining = self._remaining_timeout()
+        if remaining is None:
+            return 0.1
+        return min(0.1, remaining)
+
+    def _log_json(self, prefix: str, message: dict[str, Any]) -> None:
+        self._log_raw(prefix, json.dumps(message, ensure_ascii=False) + "\n")
+
+    def _log_raw(self, prefix: str, text: str) -> None:
+        with self.log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(f"{prefix} {text}")
+
+
+def _codex_app_server_sandbox_policy(config: TokConfig, plan: TokExecutionPlan) -> dict[str, Any]:
+    if config.sandbox == "danger-full-access":
+        return {"type": "dangerFullAccess"}
+    if config.sandbox == "read-only":
+        return {"type": "readOnly", "networkAccess": True}
+    writable_roots = [
+        str(path)
+        for path in _dedupe_paths(
+            (*config.write_dirs, *config.runtime_write_dirs, plan.report_path.parent / "attachments")
+        )
+    ]
+    return {
+        "type": "workspaceWrite",
+        "writableRoots": writable_roots,
+        "networkAccess": True,
+        "excludeTmpdirEnvVar": False,
+        "excludeSlashTmp": False,
+    }
+
+
+def _last_agent_message_text(read_response: dict[str, Any]) -> str | None:
+    thread = read_response.get("thread")
+    if not isinstance(thread, dict):
+        return None
+    turns = thread.get("turns")
+    if not isinstance(turns, list):
+        return None
+    for turn in reversed(turns):
+        if not isinstance(turn, dict):
+            continue
+        items = turn.get("items")
+        if not isinstance(items, list):
+            continue
+        for item in reversed(items):
+            if isinstance(item, dict) and item.get("type") == "agentMessage" and isinstance(item.get("text"), str):
+                return item["text"]
+    return None
+
+
 def _dedupe_paths(paths: tuple[Path, ...], skip: tuple[Path, ...] = ()) -> tuple[Path, ...]:
     skipped = {_path_key(path) for path in skip}
     seen: set[str] = set()
@@ -256,6 +607,18 @@ def _codex_goal_prompt(prompt: str) -> str:
         "Return the required report. Do not claim the artifact is complete; the next review pass decides that.\n\n"
         f"{prompt}"
     )
+
+
+def _codex_app_server_goal_prompt(prompt: str) -> str:
+    return (
+        "Keep working according to the attached review. "
+        "Return the required report. Do not claim the artifact is complete; the next review pass decides that.\n\n"
+        f"{prompt}"
+    )
+
+
+def _codex_app_server_goal_objective() -> str:
+    return "Make the configured artifact pass the attached review by editing allowed source files, then return the required schema report."
 
 
 def _claude_code_goal_prompt(prompt: str) -> str:

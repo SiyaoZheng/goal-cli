@@ -9,7 +9,7 @@ import threading
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, cast
 from urllib.parse import urlparse
 
 from .config import GoalConfig
@@ -107,7 +107,7 @@ def configure_observability(config: GoalConfig) -> GoalTelemetry:
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
         from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider
-        from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor, SpanExporter
     except ImportError as exc:
         return disabled_telemetry(f"OpenTelemetry package missing: {exc}")
 
@@ -127,7 +127,7 @@ def configure_observability(config: GoalConfig) -> GoalTelemetry:
         )
         provider = TracerProvider(resource=resource)
         if plan.kind == "local_jsonl":
-            exporter = LocalJsonlSpanExporter(plan.path or _local_trace_path(config))
+            exporter: SpanExporter = cast(SpanExporter, LocalJsonlSpanExporter(plan.path or _local_trace_path(config)))
             provider.add_span_processor(SimpleSpanProcessor(exporter))
         else:
             exporter = OTLPSpanExporter(**_exporter_kwargs(config))
@@ -166,7 +166,7 @@ def record_run_result(span: Any, result: Any) -> None:
         },
     )
     if getattr(result, "exit_code", 0) != 0:
-        _mark_error(span, getattr(result, "message", None) or getattr(result, "status", "failed"))
+        _mark_error(span, str(getattr(result, "message", None) or getattr(result, "status", "failed")))
 
 
 def record_no_mistakes_result(span: Any, result: Any) -> None:

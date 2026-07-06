@@ -13,7 +13,7 @@ from unittest import mock
 from goal_cli.adapters import api_tik_client_options, build_api_tik_prompt, effective_api_tik_model, run_tik
 from goal_cli.config import DEFAULT_API_TIK_BASE_URL, DEFAULT_API_TIK_MODEL, ConfigError, TikConfig, TokConfig, load_config, validate_config
 from goal_cli.runtime import HeartbeatLock, RuntimeOptions, cleanup_runtime, load_state, run_heartbeat, run_goal
-from goal_cli.tok_execution import TOK_REPORT_SCHEMA, build_claude_code_goal_tok_plan, build_codex_goal_tok_plan, execute_tok
+from goal_cli.tok_execution import TOK_REPORT_SCHEMA, build_claude_code_goal_tok_plan, build_codex_app_server_tok_plan, build_codex_goal_tok_plan, execute_tok
 
 
 class GoalRuntimeTests(unittest.TestCase):
@@ -164,6 +164,102 @@ class GoalRuntimeTests(unittest.TestCase):
             self.assertEqual(second_result.status, "complete")
             self.assertEqual(load_state(config)["status"], "complete")
 
+    def test_multiple_tik_providers_run_in_parallel_and_tok_receives_aggregate_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_basic_project(root)
+            self._write_barrier_tik(root, "alpha", "beta", "alpha objection")
+            self._write_barrier_tik(root, "beta", "alpha", "beta objection")
+            config_path = root / "goal.toml"
+            config_path.write_text(
+                config_path.read_text(encoding="utf-8").replace(
+                    '[tik]\nprovider = "oracle"\ncommand = "python3 scripts/tik.py"',
+                    textwrap.dedent(
+                        """
+                        [tik]
+                        timeout_seconds = 5
+
+                        [[tik.providers]]
+                        label = "alpha"
+                        provider = "oracle"
+                        command = "python3 scripts/tik_alpha.py"
+
+                        [[tik.providers]]
+                        label = "beta"
+                        provider = "oracle"
+                        command = "python3 scripts/tik_beta.py"
+                        """
+                    ).strip(),
+                ),
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+            result = run_goal(config, RuntimeOptions(max_minutes=0))
+
+            self.assertEqual(result.exit_code, 0, result.message)
+            self.assertEqual(result.status, "active")
+            assert result.run_dir is not None
+            tik_ledger = (result.run_dir / "tik.md").read_text(encoding="utf-8")
+            tik_attachment = (result.run_dir / "attachments" / "tik_review.md").read_text(encoding="utf-8")
+            self.assertIn("alpha objection", tik_ledger)
+            self.assertIn("beta objection", tik_ledger)
+            self.assertIn("## alpha (oracle)", tik_ledger)
+            self.assertIn("## beta (oracle)", tik_ledger)
+            self.assertNotIn("artifact_ready", tik_ledger)
+            self.assertEqual(tik_attachment.strip(), tik_ledger.strip())
+            self.assertTrue((result.run_dir / "alpha.md").exists())
+            self.assertTrue((result.run_dir / "beta.md").exists())
+            self.assertTrue((result.run_dir / "alpha_memo.md").exists())
+            self.assertTrue((result.run_dir / "beta_memo.md").exists())
+            state = load_state(config)
+            self.assertEqual([provider["label"] for provider in state["last_tik"]["providers"]], ["alpha", "beta"])
+            self.assertEqual(state["last_tok"]["actual_sources_changed"], ["src/source.txt"])
+
+    def test_checklist_tik_provider_runs_command_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_basic_project(root)
+            self._write_barrier_tik(root, "alpha", "checklist", "alpha objection")
+            self._write_barrier_tik(root, "checklist", "alpha", "checklist objection")
+            config_path = root / "goal.toml"
+            config_path.write_text(
+                config_path.read_text(encoding="utf-8").replace(
+                    '[tik]\nprovider = "oracle"\ncommand = "python3 scripts/tik.py"',
+                    textwrap.dedent(
+                        """
+                        [tik]
+                        timeout_seconds = 5
+
+                        [[tik.providers]]
+                        label = "alpha"
+                        provider = "oracle"
+                        command = "python3 scripts/tik_alpha.py"
+
+                        [[tik.providers]]
+                        label = "checklist"
+                        provider = "checklist"
+                        command = "python3 scripts/tik_checklist.py"
+                        """
+                    ).strip(),
+                ),
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+            result = run_goal(config, RuntimeOptions(max_minutes=0))
+
+            self.assertEqual(result.exit_code, 0, result.message)
+            self.assertEqual(result.status, "active")
+            assert result.run_dir is not None
+            tik_ledger = (result.run_dir / "tik.md").read_text(encoding="utf-8")
+            self.assertIn("checklist objection", tik_ledger)
+            self.assertIn("## checklist (checklist)", tik_ledger)
+            self.assertTrue((result.run_dir / "checklist_memo.md").exists())
+            state = load_state(config)
+            self.assertEqual(state["last_tik"]["providers"][1]["provider"], "checklist")
+            self.assertEqual(state["last_tok"]["actual_sources_changed"], ["src/source.txt"])
+
     def test_tok_success_without_source_diff_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -180,7 +276,7 @@ class GoalRuntimeTests(unittest.TestCase):
             self.assertEqual(state["last_tok"]["actual_sources_changed"], [])
             self.assertTrue((root / state["last_tok"]["source_changes_path"]).exists())
 
-    def test_tok_artifact_provenance_records_direct_artifact_change(self) -> None:
+    def test_tok_direct_artifact_mutation_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             self._write_basic_project(root)
@@ -189,9 +285,10 @@ class GoalRuntimeTests(unittest.TestCase):
             config = load_config(root / "goal.toml")
             result = run_goal(config, RuntimeOptions(max_minutes=0))
 
-            self.assertEqual(result.exit_code, 0)
-            self.assertEqual(result.status, "active")
+            self.assertEqual(result.exit_code, 1)
+            self.assertEqual(result.status, "blocked_tok_direct_artifact_mutation")
             state = load_state(config)
+            self.assertEqual(state["status"], "blocked_tok_direct_artifact_mutation")
             provenance = state["last_tok"]["artifact_provenance"]
             self.assertTrue(provenance["artifact_changed_during_tok"])
             self.assertNotEqual(
@@ -199,6 +296,50 @@ class GoalRuntimeTests(unittest.TestCase):
                 provenance["artifact_after_tok"]["sha256"],
             )
             self.assertTrue((root / state["last_tok"]["artifact_provenance_path"]).exists())
+            self.assertTrue((root / state["last_tok"]["mutation_audit_path"]).exists())
+            self.assertEqual(state["last_tok"]["mutation_audit"]["artifact_changed_during_tok"], True)
+
+    def test_tok_generated_mutation_without_runtime_scope_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_basic_project(root)
+            self._write_tok_behavior(root, {"mode": "mutate_generated"})
+
+            config = load_config(root / "goal.toml")
+            result = run_goal(config, RuntimeOptions(max_minutes=0))
+
+            self.assertEqual(result.exit_code, 1)
+            self.assertEqual(result.status, "blocked_tok_unexpected_mutation")
+            state = load_state(config)
+            self.assertEqual(state["status"], "blocked_tok_unexpected_mutation")
+            audit = state["last_tok"]["mutation_audit"]
+            self.assertIn("output/tok-side-effect.txt", audit["unexpected_changed_paths"])
+            self.assertIn("output/tok-side-effect.txt", audit["protected_changed_paths"])
+            self.assertEqual(state["last_tok"]["actual_sources_changed"], ["src/source.txt"])
+
+    def test_tok_declared_runtime_write_dir_can_change_generated_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_basic_project(root)
+            config_path = root / "goal.toml"
+            config_path.write_text(
+                config_path.read_text(encoding="utf-8").replace(
+                    'write_dirs = ["src"]',
+                    'write_dirs = ["src"]\nrun_cwd = "."\nruntime_write_dirs = ["output"]',
+                ),
+                encoding="utf-8",
+            )
+            self._write_tok_behavior(root, {"mode": "mutate_generated"})
+
+            config = load_config(config_path)
+            result = run_goal(config, RuntimeOptions(max_minutes=0))
+
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.status, "active")
+            state = load_state(config)
+            audit = state["last_tok"]["mutation_audit"]
+            self.assertEqual(audit["unexpected_changed_paths"], [])
+            self.assertEqual(state["last_tok"]["actual_sources_changed"], ["src/source.txt"])
 
     def test_successful_tok_clears_stale_blocked_reason(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -276,9 +417,6 @@ class GoalRuntimeTests(unittest.TestCase):
                     import json
                     print(json.dumps({
                         "artifact_ready": False,
-                        "central_bottleneck": "old review",
-                        "blocking_objections": [{"severity": "blocking", "objection": "old PDF objection"}],
-                        "required_next_artifact_changes": ["run a fresh review"],
                         "review_matches_current_pdf": False,
                         "current_pdf_sha256": "current-sha",
                         "reviewed_pdf_sha256": "old-sha"
@@ -499,6 +637,120 @@ class GoalRuntimeTests(unittest.TestCase):
             self.assertNotIn("tik", provider_prompt.lower())
             self.assertNotIn("bounded", provider_prompt.lower())
 
+    def test_codex_app_server_tok_drives_thread_goal_and_schema_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bin_dir = root / "bin"
+            src_dir = root / "src"
+            run_dir = root / ".goal" / "runs" / "heartbeat-0001"
+            bin_dir.mkdir()
+            src_dir.mkdir()
+            run_dir.mkdir(parents=True)
+            fake_codex = bin_dir / "codex"
+            fake_codex.write_text(
+                textwrap.dedent(
+                    """
+                    #!/usr/bin/env python3
+                    import json
+                    import sys
+                    from pathlib import Path
+
+                    assert sys.argv[1:] == ["app-server", "--stdio"]
+                    report = {
+                        "source_change_possible": True,
+                        "revision_strategy": "edit source through app-server",
+                        "expected_artifact_visible_improvement": ["artifact changes"],
+                        "remaining_artifact_bottleneck": "none known"
+                    }
+
+                    def respond(request_id, result):
+                        print(json.dumps({"id": request_id, "result": result}), flush=True)
+
+                    for line in sys.stdin:
+                        message = json.loads(line)
+                        method = message["method"]
+                        request_id = message["id"]
+                        params = message.get("params") or {}
+                        if method == "initialize":
+                            respond(request_id, {"userAgent": "fake-codex-app-server"})
+                        elif method == "thread/start":
+                            assert params["ephemeral"] is True
+                            assert params["approvalPolicy"] == "never"
+                            assert params["sandbox"] == "workspace-write"
+                            respond(request_id, {"thread": {"id": "thread-1"}})
+                        elif method == "thread/goal/set":
+                            assert params["threadId"] == "thread-1"
+                            assert params["status"] == "active"
+                            assert "artifact" in params["objective"]
+                            respond(request_id, {"goal": {"threadId": "thread-1", "objective": params["objective"], "status": "active"}})
+                        elif method == "turn/start":
+                            assert params["threadId"] == "thread-1"
+                            assert params["approvalPolicy"] == "never"
+                            assert params["outputSchema"]["required"] == [
+                                "source_change_possible",
+                                "revision_strategy",
+                                "expected_artifact_visible_improvement",
+                                "remaining_artifact_bottleneck",
+                            ]
+                            prompt = params["input"][0]["text"]
+                            assert prompt.startswith("Keep working according to the attached review")
+                            assert "/goal" not in prompt
+                            sandbox_policy = params["sandboxPolicy"]
+                            assert sandbox_policy["type"] == "workspaceWrite"
+                            assert any(path.endswith("attachments") for path in sandbox_policy["writableRoots"])
+                            Path(params["cwd"], "source.txt").write_text("ready\\n", encoding="utf-8")
+                            respond(request_id, {"turn": {"id": "turn-1", "status": "inProgress", "items": []}})
+                            print(json.dumps({
+                                "method": "turn/completed",
+                                "params": {"threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed", "items": []}}
+                            }), flush=True)
+                        elif method == "thread/read":
+                            respond(request_id, {
+                                "thread": {
+                                    "id": "thread-1",
+                                    "turns": [{
+                                        "items": [{
+                                            "type": "agentMessage",
+                                            "id": "agent-1",
+                                            "text": json.dumps(report),
+                                            "phase": None,
+                                            "memoryCitation": None
+                                        }]
+                                    }]
+                                }
+                            })
+                        else:
+                            raise SystemExit(f"unexpected method: {method}")
+                    """
+                ).strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+            old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = f"{bin_dir}{os.pathsep}{old_path}"
+            try:
+                config = load_config(self._write_codex_goal_project(root, tok_provider="codex_app_server"))
+                plan = build_codex_app_server_tok_plan(config.tok, "repair prompt", run_dir)
+                self.assertEqual(plan.command, ("codex", "app-server", "--stdio"))
+                self.assertEqual(plan.cwd, src_dir.resolve())
+                result = execute_tok(config.tok, "repair prompt", run_dir)
+            finally:
+                os.environ["PATH"] = old_path
+
+            self.assertTrue(result.ok, result.detail)
+            self.assertEqual(result.report_path, run_dir / "tok_report.json")
+            report = json.loads((run_dir / "tok_report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["revision_strategy"], "edit source through app-server")
+            self.assertEqual((root / "src" / "source.txt").read_text(encoding="utf-8"), "ready\n")
+            self.assertTrue((run_dir / "tok_report.schema.json").exists())
+            log_text = (run_dir / "tok_codex_app_server.log").read_text(encoding="utf-8")
+            self.assertIn("thread/goal/set", log_text)
+            self.assertIn("turn/start", log_text)
+            provider_prompt = (run_dir / "tok_codex_app_server_prompt.md").read_text(encoding="utf-8")
+            self.assertFalse(provider_prompt.startswith("/goal"))
+            self.assertIn("Return the required report", provider_prompt)
+
     def test_claude_code_goal_plan_maps_sandbox_modes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -634,8 +886,8 @@ class GoalRuntimeTests(unittest.TestCase):
             tok_prompt = (result.run_dir / "tok_prompt.md").read_text(encoding="utf-8")
             self.assertIn("# Referee Report", tik_ledger)
             self.assertIn("draft artifact", tik_ledger)
-            self.assertIn("## Review Text", tik_ledger)
-            self.assertIn("## Parsed Verdict", tik_ledger)
+            self.assertNotIn("artifact_ready", tik_ledger)
+            self.assertNotIn("## Parsed Verdict", tik_ledger)
             self.assertEqual(tik_review.read_text(encoding="utf-8").strip(), tik_ledger.strip())
             self.assertIn(str(tik_review), tok_prompt)
             self.assertNotIn(tik_ledger.strip(), tok_prompt)
@@ -660,12 +912,7 @@ class GoalRuntimeTests(unittest.TestCase):
 
                     ```json
                     {
-                      "artifact_ready": false,
-                      "central_bottleneck": "measurement is not validated",
-                      "blocking_objections": [
-                        {"severity": "blocking", "objection": "no validation evidence"}
-                      ],
-                      "required_next_artifact_changes": ["add validation evidence"]
+                      "artifact_ready": false
                     }
                     ```
                     """)
@@ -683,12 +930,14 @@ class GoalRuntimeTests(unittest.TestCase):
             self.assertIn("Referee report", (result.run_dir / "tik_memo.md").read_text(encoding="utf-8"))
             verdict = json.loads((result.run_dir / "tik_verdict.json").read_text(encoding="utf-8"))
             self.assertFalse(verdict["_parse_error"])
-            self.assertEqual(verdict["central_bottleneck"], "measurement is not validated")
+            self.assertFalse(verdict["artifact_ready"])
             tok_prompt = (result.run_dir / "tok_prompt.md").read_text(encoding="utf-8")
             tik_review = result.run_dir / "attachments" / "tik_review.md"
             self.assertIn(str(tik_review), tok_prompt)
             self.assertNotIn("This manuscript is not ready for publication", tok_prompt)
-            self.assertIn("This manuscript is not ready for publication", tik_review.read_text(encoding="utf-8"))
+            tik_review_text = tik_review.read_text(encoding="utf-8")
+            self.assertIn("This manuscript is not ready for publication", tik_review_text)
+            self.assertNotIn("artifact_ready", tik_review_text)
 
     def test_codex_file_tik_uses_single_artifact_read_only_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -722,12 +971,11 @@ class GoalRuntimeTests(unittest.TestCase):
                     assert "Only inspect this local artifact file" not in prompt
                     assert "temporary directory" not in prompt
                     assert "configured review prompt" in prompt
-                    output_path.write_text(json.dumps({
-                        "artifact_ready": False,
-                        "central_bottleneck": "needs evidence",
-                        "blocking_objections": [{"severity": "blocking", "objection": "thin evidence"}],
-                        "required_next_artifact_changes": ["add evidence"]
-                    }) + "\\n", encoding="utf-8")
+                    output_path.write_text(
+                        "Review: thin evidence.\\n" +
+                        json.dumps({"artifact_ready": False}) + "\\n",
+                        encoding="utf-8"
+                    )
                     """
                 ).strip()
                 + "\n",
@@ -785,12 +1033,7 @@ class GoalRuntimeTests(unittest.TestCase):
                     prompt = sys.stdin.read()
                     assert prompt.startswith("/apsr-review\\n")
                     assert "configured review prompt" in prompt
-                    memo = json.dumps({
-                        "artifact_ready": False,
-                        "central_bottleneck": "needs evidence",
-                        "blocking_objections": [{"severity": "blocking", "objection": "thin evidence"}],
-                        "required_next_artifact_changes": ["add evidence"]
-                    })
+                    memo = "Review: thin evidence.\\n" + json.dumps({"artifact_ready": False})
                     print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": memo}))
                     """
                 ).strip()
@@ -1161,12 +1404,11 @@ class GoalRuntimeTests(unittest.TestCase):
                 from pathlib import Path
                 artifact = Path(os.environ["GOAL_ARTIFACT"]).read_text(encoding="utf-8")
                 ready = artifact.strip() == "ready"
-                print(json.dumps({
-                    "artifact_ready": ready,
-                    "central_bottleneck": "" if ready else "artifact still says draft",
-                    "blocking_objections": [] if ready else [{"severity": "blocking", "objection": "draft artifact"}],
-                    "required_next_artifact_changes": [] if ready else ["change artifact content to ready"]
-                }))
+                if ready:
+                    print("Review: artifact is ready.")
+                else:
+                    print("Review: draft artifact remains.")
+                print(json.dumps({"artifact_ready": ready}))
                 """
             ).strip()
             + "\n",
@@ -1190,9 +1432,7 @@ command = "python3 scripts/tik.py"
 
 [tik.verdict]
 ready_field = "artifact_ready"
-blockers_field = "blocking_objections"
-required_fields = ["artifact_ready", "blocking_objections"]
-fingerprint_fields = ["blocking_objections", "central_bottleneck"]
+required_fields = ["artifact_ready"]
 
 [tik.prompt]
 text = """
@@ -1238,7 +1478,7 @@ max_blocker_repeats = 3
                 output_path = Path(args[args.index("--output-last-message") + 1])
                 schema_path = Path(args[args.index("--output-schema") + 1])
                 workspace = Path(args[args.index("-C") + 1])
-                root = workspace.parent
+                root = workspace if (workspace / "goal.toml").exists() else workspace.parent
                 assert args[0] == "exec"
                 assert "--enable" in args and "goals" in args
                 assert schema_path.exists()
@@ -1265,6 +1505,10 @@ max_blocker_repeats = 3
                     raise SystemExit(0)
                 if behavior["mode"] == "mutate_artifact":
                     (root / "output" / "artifact.txt").write_text("hand-edited artifact\\n", encoding="utf-8")
+                if behavior["mode"] == "mutate_generated":
+                    (root / "output" / "tok-side-effect.txt").write_text("runtime side effect\\n", encoding="utf-8")
+                if behavior["mode"] == "mutate_unexpected":
+                    (root / "scripts" / "tok-side-effect.txt").write_text("unexpected side effect\\n", encoding="utf-8")
                 (root / "src" / "source.txt").write_text("ready\\n", encoding="utf-8")
                 output_path.write_text(json.dumps({
                     "source_change_possible": True,
@@ -1284,6 +1528,33 @@ max_blocker_repeats = 3
 
     def _write_tok_behavior(self, root: Path, behavior: dict[str, object]) -> None:
         (root / "scripts" / "tok_behavior.json").write_text(json.dumps(behavior), encoding="utf-8")
+
+    def _write_barrier_tik(self, root: Path, label: str, other_label: str, objection: str) -> None:
+        (root / "scripts" / f"tik_{label}.py").write_text(
+            textwrap.dedent(
+                f"""
+                import json
+                import os
+                import time
+                from pathlib import Path
+
+                run_dir = Path(os.environ["GOAL_RUN_DIR"])
+                (run_dir / "{label}.started").write_text("started\\n", encoding="utf-8")
+                deadline = time.time() + 3
+                while time.time() < deadline:
+                    if (run_dir / "{other_label}.started").exists():
+                        break
+                    time.sleep(0.05)
+                else:
+                    raise SystemExit("timed out waiting for {other_label}")
+
+                print("Review: {objection}.")
+                print(json.dumps({{"artifact_ready": False}}))
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
 
     def _write_codex_goal_project(self, root: Path, tok_provider: str = "codex_goal") -> Path:
         config = '''

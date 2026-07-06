@@ -181,6 +181,33 @@ Hi, read https://github.com/SiyaoZheng/goal-cli/blob/master/llms.txt and do what
 | 怎么验收它？ | `[tik]` |
 | Agent 可以改哪些目录？ | `[tok].write_dirs` |
 
+`tik` 可以配置多个 provider 并行验收；每一路结果会合并成一份 `tik.md`
+交给 `tok`：
+
+```toml
+[tik]
+timeout_seconds = 1800
+
+[[tik.providers]]
+label = "codex"
+provider = "codex_file"
+
+[[tik.providers]]
+label = "claude"
+provider = "claude_code_file"
+
+[[tik.providers]]
+label = "checklist"
+provider = "checklist"
+command = "python3 scripts/checklist_review.py"
+```
+
+`tok.provider` 可以用 `codex_goal`、`codex_app_server` 或
+`claude_code_goal`；其中 `codex_app_server` 走 `codex app-server --stdio`。
+
+`tik.provider = "checklist"` 用来跑基于项目脚本的 checklist 验收，并在
+`tik.md` 和 state 里保留独立 provider 身份。
+
 常用命令：
 
 | 命令 | 用途 |

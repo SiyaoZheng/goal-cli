@@ -110,15 +110,20 @@ After the producer, the runtime has exactly two sequential roles:
 
 - Tik: judges the finished thing and writes `tik.md`. Public tik modes are
   `oracle` for deterministic scripts, tests, metrics, or other machine
-  evaluators; `api` for API-backed file-upload evaluation with optional
+  evaluators; `checklist` for command-backed checklist review providers;
+  `api` for API-backed file-upload evaluation with optional
   `tik.skill` expansion; `codex_file` for Codex evaluation of a local artifact
   copy in an ephemeral read-only workspace; and `claude_code_file` for Claude
-  Code evaluation of a local artifact copy with write tools disallowed. If tik
-  reports a stale artifact
-  hash, the heartbeat blocks before tok.
+  Code evaluation of a local artifact copy with write tools disallowed. A tik
+  phase may fan out to multiple configured providers in parallel; the runtime
+  waits for all provider verdicts, writes provider-specific ledgers, and hands
+  tok one aggregate `tik.md`. If any tik provider fails, returns unparseable
+  output, or reports a stale artifact hash, the heartbeat blocks before tok.
 - Tok: reads `tik.md` and changes allowed source so the next artifact can
-  answer the blocking objections. The default mode is `codex_goal`;
-  `claude_code_goal` is the Claude Code equivalent.
+  answer the blocking objections. Public tok modes are `codex_goal` for
+  `codex exec` with `/goal`, `codex_app_server` for
+  `codex app-server --stdio` with a real app-server thread goal, and
+  `claude_code_goal` for the same source-fixing pass through Claude Code.
 
 ## Core Runtime Shape
 
@@ -127,7 +132,7 @@ After the producer, the runtime has exactly two sequential roles:
 3. Prepare the no-mistakes Git gate when enabled.
 4. Run the producer command.
 5. Verify that the finished thing exists.
-6. Run tik against the artifact and write `tik.md`.
+6. Run tik provider(s) against the artifact and write aggregate `tik.md`.
 7. Reject stale or unparseable tik output before tok.
 8. If the tik passes, run the completion gate and mark the goal complete.
 9. If the tik fails, launch one tok pass against validated source boundaries.

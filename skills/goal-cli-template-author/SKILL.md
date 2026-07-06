@@ -78,10 +78,13 @@ with:
 
 ```json
 {
-  "artifact_ready": false,
-  "blocking_objections": []
+  "artifact_ready": false
 }
 ```
+
+For `checklist` templates, use the same command-backed contract as `oracle`,
+but reserve the provider name for checklist-style reviews that should show up
+as `checklist` in tik ledgers and state.
 
 For `codex_file` and `claude_code_file` templates, write a concise
 artifact-only prompt. If a slash skill is required, it must be the first line
@@ -121,11 +124,15 @@ Add smoke checks when relevant:
 
 ```bash
 goal-cli doctor --smoke-codex-goal
+goal-cli doctor --smoke-codex-app-server
 goal-cli doctor --smoke-codex-goal --smoke-codex-file-tik
+goal-cli doctor --smoke-codex-app-server --smoke-codex-file-tik
 ```
 
 If a template includes a tik oracle script, include a direct oracle command and
 the expected verdict shape.
+If it includes a checklist runner, use `provider = "checklist"` and document
+that `goal-cli doctor` checks the command statically.
 
 If a template recommends unattended progress, include the system-level
 heartbeat command and state that each tick still runs exactly one heartbeat:
@@ -175,15 +182,16 @@ max_output_tokens = 4096
 
 [tik.verdict]
 ready_field = "artifact_ready"
-blockers_field = "blocking_objections"
-required_fields = ["artifact_ready", "blocking_objections"]
-fingerprint_fields = ["blocking_objections"]
+required_fields = ["artifact_ready"]
 
 [tok]
 provider = "codex_goal"
 sandbox = "workspace-write"
 write_dirs = ["writing", "src"]
 codex_features = ["goals"]
+
+# Use provider = "codex_app_server" for Codex app-server stdio instead of
+# codex exec, or provider = "claude_code_goal" for Claude Code.
 
 [safety]
 generated_dirs = ["output", "build", "cache"]

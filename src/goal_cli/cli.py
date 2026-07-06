@@ -36,27 +36,31 @@ command = "make artifact"
 [tik]
 provider = "oracle"
 command = "python3 scripts/tik.py"
+# Optional: replace provider/command above with multiple parallel tik providers:
+# [[tik.providers]]
+# label = "codex"
+# provider = "codex_file"
+#
+# [[tik.providers]]
+# label = "claude"
+# provider = "claude_code_file"
 
 [tik.verdict]
 ready_field = "artifact_ready"
-blockers_field = "blocking_objections"
-required_fields = ["artifact_ready", "blocking_objections"]
-fingerprint_fields = ["blocking_objections", "central_bottleneck"]
+required_fields = ["artifact_ready"]
 
 [tik.prompt]
 text = \"\"\"
 Review only the finished thing at {artifact_path}.
 Write the critique plainly, then include a JSON object with this shape:
 {
-  "artifact_ready": false,
-  "central_bottleneck": "one sentence",
-  "blocking_objections": [],
-  "required_next_artifact_changes": []
+  "artifact_ready": false
 }
 \"\"\"
 
 [tok]
 provider = "codex_goal"
+# Use "codex_app_server" to drive Codex through `codex app-server --stdio`.
 write_dirs = ["src"]
 # Optional: set run_cwd and runtime_write_dirs when the producer must run from
 # the project root and refresh generated artifacts outside write_dirs.
@@ -114,12 +118,13 @@ def main(argv: list[str] | None = None) -> int:
         description="Check config, commands, providers, and smoke prerequisites before a real heartbeat.",
     )
     doctor_parser.add_argument("--smoke-codex-goal", action="store_true", help="Run a minimal Codex /goal schema-output smoke check in a temp directory")
+    doctor_parser.add_argument("--smoke-codex-app-server", action="store_true", help="Run a minimal Codex app-server stdio tok smoke check in a temp directory")
     doctor_parser.add_argument("--smoke-claude-code-goal", action="store_true", help="Run a minimal Claude Code structured-output tok smoke check in a temp directory")
     doctor_parser.add_argument("--smoke-codex-file-tik", action="store_true", help="Run a minimal Codex local-file tik smoke check in a temp directory")
     doctor_parser.add_argument("--smoke-claude-code-file-tik", action="store_true", help="Run a minimal Claude Code local-file tik smoke check in a temp directory")
     doctor_parser.add_argument("--skip-openai-auth", action="store_true", help="Skip API key readiness check for API tik configs")
-    doctor_parser.add_argument("--timeout-seconds", type=float, default=10.0, help="Timeout for setup probes except optional Codex smoke checks")
-    doctor_parser.add_argument("--smoke-timeout-seconds", type=float, default=180.0, help="Timeout for optional Codex smoke checks")
+    doctor_parser.add_argument("--timeout-seconds", type=float, default=10.0, help="Timeout for setup probes except optional provider smoke checks")
+    doctor_parser.add_argument("--smoke-timeout-seconds", type=float, default=180.0, help="Timeout for optional provider smoke checks")
     run_parser = subparsers.add_parser(
         "run",
         help="Run one autonomous heartbeat",
@@ -191,6 +196,7 @@ def main(argv: list[str] | None = None) -> int:
             config,
             DoctorOptions(
                 smoke_codex_goal=getattr(args, "smoke_codex_goal", False),
+                smoke_codex_app_server=getattr(args, "smoke_codex_app_server", False),
                 smoke_claude_code_goal=getattr(args, "smoke_claude_code_goal", False),
                 smoke_codex_file_tik=getattr(args, "smoke_codex_file_tik", False),
                 smoke_claude_code_file_tik=getattr(args, "smoke_claude_code_file_tik", False),
@@ -207,10 +213,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Reset state: {config.state_path}")
         return 0
     if command == "cleanup":
-        result = cleanup_runtime(config, kill_orphans=getattr(args, "kill_orphans", False))
-        for action in result.actions:
+        cleanup_result = cleanup_runtime(config, kill_orphans=getattr(args, "kill_orphans", False))
+        for action in cleanup_result.actions:
             print(action)
-        for warning in result.warnings:
+        for warning in cleanup_result.warnings:
             print(f"warning: {warning}", file=sys.stderr)
         return 0
     if command == "render-prompts":
@@ -221,25 +227,25 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Rendered prompts: {run_dir}")
         return 0
     if command == "tik":
-        result = run_heartbeat(config, RuntimeOptions(review_only=True))
-        print(result.message)
-        if result.run_dir:
-            print(f"Run directory: {result.run_dir}")
-        return result.exit_code
+        tik_result = run_heartbeat(config, RuntimeOptions(review_only=True))
+        print(tik_result.message)
+        if tik_result.run_dir:
+            print(f"Run directory: {tik_result.run_dir}")
+        return tik_result.exit_code
     if command == "heartbeat":
         return heartbeat_command(config, args)
     if command == "run":
-        result = run_goal(
+        run_result = run_goal(
             config,
             RuntimeOptions(
                 dry_run=getattr(args, "dry_run", False),
                 max_minutes=getattr(args, "max_minutes", 30.0),
             ),
         )
-        print(result.message)
-        if result.run_dir:
-            print(f"Run directory: {result.run_dir}")
-        return result.exit_code
+        print(run_result.message)
+        if run_result.run_dir:
+            print(f"Run directory: {run_result.run_dir}")
+        return run_result.exit_code
     parser.error(f"unknown command: {command}")
     return 2
 

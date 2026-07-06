@@ -17,6 +17,8 @@ TERMINAL_STATUSES = {
     "blocked_repeated_same_objection",
     "blocked_no_source_change_possible",
     "blocked_tok_no_source_changes",
+    "blocked_tok_direct_artifact_mutation",
+    "blocked_tok_unexpected_mutation",
 }
 
 NO_MISTAKES_SKIP_STEPS = {
@@ -52,6 +54,8 @@ DEFAULT_API_TIK_BASE_URL = "https://www.packyapi.com/v1"
 API_TIK_KEY_ENV_VARS = ("PACKYAPI_API_KEY", "PACKYCODE_CODEX_KEY", "OPENAI_API_KEY")
 API_TIK_BASE_URL_ENV_VARS = ("PACKYAPI_BASE_URL", "OPENAI_BASE_URL")
 API_TIK_ENV_FILE_ENV_VAR = "GOAL_CLI_API_ENV_FILE"
+COMMAND_TIK_PROVIDERS = frozenset({"oracle", "checklist"})
+SUPPORTED_TIK_PROVIDERS = COMMAND_TIK_PROVIDERS | frozenset({"api", "codex_file", "claude_code_file"})
 
 TIK_PROMPT_PLACEHOLDERS = {
     "goal_name",
@@ -103,15 +107,14 @@ class ProducerConfig:
 @dataclass(frozen=True)
 class VerdictConfig:
     ready_field: str = "artifact_ready"
-    blockers_field: str = "blocking_objections"
-    required_fields: tuple[str, ...] = ("artifact_ready", "blocking_objections")
-    fingerprint_fields: tuple[str, ...] = ("blocking_objections", "central_bottleneck")
+    required_fields: tuple[str, ...] = ("artifact_ready",)
 
 
 @dataclass(frozen=True)
 class TikConfig:
     provider: str
     prompt: str
+    label: str = "tik"
     model: str | None = None
     command: str | None = None
     skill: str | None = None
@@ -124,6 +127,7 @@ class TikConfig:
     max_output_tokens: int = 4096
     store: bool = False
     verdict: VerdictConfig = field(default_factory=VerdictConfig)
+    providers: tuple["TikConfig", ...] = ()
 
 
 @dataclass(frozen=True)
@@ -263,34 +267,33 @@ def load_config(config_path: str | Path = "goal.toml") -> GoalConfig:
         raise ConfigError("[tik.verdict] must be a table")
     verdict = VerdictConfig(
         ready_field=str(verdict_raw.get("ready_field", "artifact_ready")),
-        blockers_field=str(verdict_raw.get("blockers_field", "blocking_objections")),
-        required_fields=tuple(_string_list(verdict_raw.get("required_fields", ["artifact_ready", "blocking_objections"]), "tik.verdict.required_fields")),
-        fingerprint_fields=tuple(_string_list(verdict_raw.get("fingerprint_fields", ["blocking_objections", "central_bottleneck"]), "tik.verdict.fingerprint_fields")),
+        required_fields=tuple(_string_list(verdict_raw.get("required_fields", ["artifact_ready"]), "tik.verdict.required_fields")),
     )
-    tik_provider = _required_str(tik_raw, "provider")
-    tik_model = _optional_str(tik_raw, "model")
-    if tik_provider == "api" and tik_model is None:
-        tik_model = DEFAULT_API_TIK_MODEL
+    tik_providers_raw = _tik_providers_raw(tik_raw)
+    tik_providers_config = _load_tik_providers(tik_raw, tik_providers_raw, tik_prompt, verdict)
+    primary_tik = tik_providers_config[0]
     tik = TikConfig(
-        provider=tik_provider,
-        prompt=tik_prompt,
-        model=tik_model,
-        command=_optional_str(tik_raw, "command"),
-        skill=_optional_str(tik_raw, "skill"),
-        base_url=_optional_str(tik_raw, "base_url"),
-        binary=str(tik_raw.get("binary", "oracle")),
-        engine=str(tik_raw.get("engine", "browser")),
-        timeout=str(tik_raw.get("timeout", "auto")),
-        timeout_seconds=float(tik_raw.get("timeout_seconds", 1800)),
-        max_file_size_bytes=int(tik_raw.get("max_file_size_bytes", 25_000_000)),
-        max_output_tokens=int(tik_raw.get("max_output_tokens", 4096)),
-        store=bool(tik_raw.get("store", False)),
+        provider=primary_tik.provider,
+        prompt=primary_tik.prompt,
+        label=primary_tik.label,
+        model=primary_tik.model,
+        command=primary_tik.command,
+        skill=primary_tik.skill,
+        base_url=primary_tik.base_url,
+        binary=primary_tik.binary,
+        engine=primary_tik.engine,
+        timeout=primary_tik.timeout,
+        timeout_seconds=primary_tik.timeout_seconds,
+        max_file_size_bytes=primary_tik.max_file_size_bytes,
+        max_output_tokens=primary_tik.max_output_tokens,
+        store=primary_tik.store,
         verdict=verdict,
+        providers=tik_providers_config,
     )
 
     tok_raw = _required_table(raw, "tok")
     if "command" in tok_raw:
-        raise ConfigError("unsupported tok field: command; tok provider must be 'codex_goal' or 'claude_code_goal'")
+        raise ConfigError("unsupported tok field: command; tok provider must be 'codex_goal', 'codex_app_server', or 'claude_code_goal'")
     tok_prompt = _prompt_from(tok_raw, required_key="prompt_template")
     write_dirs = tuple(_path(item, root, root) for item in _string_list(tok_raw.get("write_dirs"), "tok.write_dirs"))
     run_cwd = _path(tok_raw["run_cwd"], root, root) if "run_cwd" in tok_raw else (write_dirs[0] if write_dirs else root)
@@ -382,29 +385,168 @@ def load_config(config_path: str | Path = "goal.toml") -> GoalConfig:
     )
 
 
+def tik_providers(tik: TikConfig) -> tuple[TikConfig, ...]:
+    return tik.providers or (tik,)
+
+
+def tik_provider_types(tik: TikConfig) -> set[str]:
+    return {provider.provider for provider in tik_providers(tik)}
+
+
+def _tik_providers_raw(tik_raw: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    raw = tik_raw.get("providers")
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+        raise ConfigError("tik.providers must be an array of tables")
+    if not raw:
+        raise ConfigError("tik.providers must contain at least one provider table when defined")
+    return tuple(raw)
+
+
+def _load_tik_providers(
+    tik_raw: dict[str, Any],
+    providers_raw: tuple[dict[str, Any], ...],
+    default_prompt: str,
+    verdict: VerdictConfig,
+) -> tuple[TikConfig, ...]:
+    top_provider = _optional_str(tik_raw, "provider") if "provider" in tik_raw else None
+    defaults = {
+        "provider": top_provider,
+        "prompt": default_prompt,
+        "model": _optional_str(tik_raw, "model"),
+        "command": _optional_str(tik_raw, "command"),
+        "skill": _optional_str(tik_raw, "skill"),
+        "base_url": _optional_str(tik_raw, "base_url"),
+        "binary": str(tik_raw.get("binary", "oracle")),
+        "engine": str(tik_raw.get("engine", "browser")),
+        "timeout": str(tik_raw.get("timeout", "auto")),
+        "timeout_seconds": float(tik_raw.get("timeout_seconds", 1800)),
+        "max_file_size_bytes": int(tik_raw.get("max_file_size_bytes", 25_000_000)),
+        "max_output_tokens": int(tik_raw.get("max_output_tokens", 4096)),
+        "store": _bool(tik_raw.get("store"), False, "tik.store"),
+    }
+    if not providers_raw:
+        if top_provider is None:
+            raise ConfigError("tik.provider must be defined when tik.providers is not configured")
+        return (
+            _load_tik_provider(
+                tik_raw,
+                label="tik",
+                provider=top_provider,
+                defaults=defaults,
+                verdict=verdict,
+                label_context="tik",
+            ),
+        )
+
+    providers: list[TikConfig] = []
+    used_labels: set[str] = set()
+    for index, provider_raw in enumerate(providers_raw, start=1):
+        provider = _optional_str(provider_raw, "provider") if "provider" in provider_raw else top_provider
+        if provider is None:
+            raise ConfigError(f"tik.providers[{index}] must define provider")
+        label = _tik_provider_label(provider_raw, provider, index, used_labels)
+        providers.append(
+            _load_tik_provider(
+                provider_raw,
+                label=label,
+                provider=provider,
+                defaults=defaults,
+                verdict=verdict,
+                label_context=f"tik.providers[{index}]",
+            )
+        )
+    return tuple(providers)
+
+
+def _load_tik_provider(
+    raw: dict[str, Any],
+    *,
+    label: str,
+    provider: str,
+    defaults: dict[str, Any],
+    verdict: VerdictConfig,
+    label_context: str,
+) -> TikConfig:
+    prompt = _optional_prompt_from(raw, "prompt") or str(defaults["prompt"])
+    model = _optional_str(raw, "model") if "model" in raw else defaults["model"]
+    if provider == "api" and model is None:
+        model = DEFAULT_API_TIK_MODEL
+    return TikConfig(
+        provider=provider,
+        prompt=prompt,
+        label=label,
+        model=model,
+        command=_optional_str(raw, "command") if "command" in raw else defaults["command"],
+        skill=_optional_str(raw, "skill") if "skill" in raw else defaults["skill"],
+        base_url=_optional_str(raw, "base_url") if "base_url" in raw else defaults["base_url"],
+        binary=str(raw.get("binary", defaults["binary"])),
+        engine=str(raw.get("engine", defaults["engine"])),
+        timeout=str(raw.get("timeout", defaults["timeout"])),
+        timeout_seconds=float(raw.get("timeout_seconds", defaults["timeout_seconds"])),
+        max_file_size_bytes=int(raw.get("max_file_size_bytes", defaults["max_file_size_bytes"])),
+        max_output_tokens=int(raw.get("max_output_tokens", defaults["max_output_tokens"])),
+        store=_bool(raw.get("store"), bool(defaults["store"]), f"{label_context}.store"),
+        verdict=verdict,
+    )
+
+
+def _optional_prompt_from(raw: dict[str, Any], required_key: str) -> str | None:
+    if "prompt" not in raw and required_key not in raw:
+        return None
+    return _prompt_from(raw, required_key=required_key)
+
+
+def _tik_provider_label(raw: dict[str, Any], provider: str, index: int, used_labels: set[str]) -> str:
+    raw_label = _optional_str(raw, "label") if "label" in raw else None
+    base = _safe_tik_label(raw_label or provider)
+    if base == "tik":
+        base = f"tik_{index}"
+    label = base
+    suffix = 2
+    while label in used_labels:
+        label = f"{base}_{suffix}"
+        suffix += 1
+    used_labels.add(label)
+    return label
+
+
+def _safe_tik_label(value: str) -> str:
+    label = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip()).strip("._-")
+    return label or "provider"
+
+
 def analyze_config_policy(config: GoalConfig) -> ConfigPolicyReport:
     issues: list[ConfigIssue] = []
     if not _inside(config.root, config.path):
         issues.append(ConfigIssue("config.outside_root", f"config file must be inside project root: {config.path}"))
-    if config.tik.provider not in {"oracle", "api", "codex_file", "claude_code_file"}:
-        issues.append(ConfigIssue("tik.provider.unsupported", f"unsupported tik provider: {config.tik.provider}"))
-    if config.tok.provider not in {"codex_goal", "claude_code_goal"}:
-        issues.append(ConfigIssue("tok.provider.unsupported", f"unsupported tok provider: {config.tok.provider}"))
-    if config.tik.provider == "oracle" and not config.tik.command:
-        issues.append(ConfigIssue("tik.command.required", "tik provider 'oracle' requires tik.command"))
-    if config.tik.provider == "api" and tik_prompt_starts_with_slash_command(config.tik.prompt):
-        issues.append(
-            ConfigIssue(
-                "tik.prompt.slash_unsupported",
-                "tik provider 'api' cannot execute slash skill commands; set tik.skill and remove the leading slash command",
+    seen_tik_labels: set[str] = set()
+    for tik_provider in tik_providers(config.tik):
+        label = tik_provider.label
+        if label in seen_tik_labels:
+            issues.append(ConfigIssue("tik.label.duplicate", f"duplicate tik provider label: {label}"))
+        seen_tik_labels.add(label)
+        label_prefix = "tik" if len(tik_providers(config.tik)) == 1 else f"tik.providers.{label}"
+        if tik_provider.provider not in SUPPORTED_TIK_PROVIDERS:
+            issues.append(ConfigIssue("tik.provider.unsupported", f"unsupported tik provider for {label_prefix}: {tik_provider.provider}"))
+        if tik_provider.provider in COMMAND_TIK_PROVIDERS and not tik_provider.command:
+            issues.append(ConfigIssue("tik.command.required", f"tik provider '{tik_provider.provider}' requires {label_prefix}.command"))
+        if tik_provider.provider == "api" and tik_prompt_starts_with_slash_command(tik_provider.prompt):
+            issues.append(
+                ConfigIssue(
+                    "tik.prompt.slash_unsupported",
+                    f"tik provider 'api' cannot execute slash skill commands in {label_prefix}.prompt; set skill and remove the leading slash command",
+                )
             )
-        )
-    if config.tik.skill:
-        if config.tik.provider != "api":
-            issues.append(ConfigIssue("tik.skill.unsupported", "tik.skill is only supported for tik provider 'api'"))
-        elif resolve_tik_skill_path(config.tik.skill, config.root) is None:
-            issues.append(ConfigIssue("tik.skill.missing", f"tik.skill could not be resolved to a SKILL.md file: {config.tik.skill}"))
-    if config.tok.provider in {"codex_goal", "claude_code_goal"} and config.tok.sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
+        if tik_provider.skill:
+            if tik_provider.provider != "api":
+                issues.append(ConfigIssue("tik.skill.unsupported", f"{label_prefix}.skill is only supported for tik provider 'api'"))
+            elif resolve_tik_skill_path(tik_provider.skill, config.root) is None:
+                issues.append(ConfigIssue("tik.skill.missing", f"{label_prefix}.skill could not be resolved to a SKILL.md file: {tik_provider.skill}"))
+    if config.tok.provider not in {"codex_goal", "codex_app_server", "claude_code_goal"}:
+        issues.append(ConfigIssue("tok.provider.unsupported", f"unsupported tok provider: {config.tok.provider}"))
+    if config.tok.provider in {"codex_goal", "codex_app_server", "claude_code_goal"} and config.tok.sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
         issues.append(ConfigIssue("tok.sandbox.unsupported", f"unsupported tok sandbox: {config.tok.sandbox}"))
     if config.no_mistakes.enabled:
         if not config.no_mistakes.binary:
@@ -563,9 +705,11 @@ def analyze_run_cwd_policy(config: GoalConfig) -> tuple[ConfigIssue, ...]:
 
 def validate_prompt_templates(config: GoalConfig) -> list[str]:
     issues: list[str] = []
-    tik_unknown = template_placeholders(config.tik.prompt) - TIK_PROMPT_PLACEHOLDERS
-    for placeholder in sorted(tik_unknown):
-        issues.append(f"unknown tik prompt placeholder: {{{placeholder}}}")
+    for tik_provider in tik_providers(config.tik):
+        label = "tik" if len(tik_providers(config.tik)) == 1 else f"tik.providers.{tik_provider.label}"
+        tik_unknown = template_placeholders(tik_provider.prompt) - TIK_PROMPT_PLACEHOLDERS
+        for placeholder in sorted(tik_unknown):
+            issues.append(f"unknown {label} prompt placeholder: {{{placeholder}}}")
     tok_unknown = template_placeholders(config.tok.prompt_template) - TOK_PROMPT_PLACEHOLDERS
     for placeholder in sorted(tok_unknown):
         issues.append(f"unknown tok prompt placeholder: {{{placeholder}}}")
@@ -612,9 +756,11 @@ def tik_skill_candidate_paths(reference: str, root: Path) -> tuple[Path, ...]:
 def validate_runtime_prompt_language(config: GoalConfig) -> list[str]:
     issues: list[str] = []
     prompt_sources = {
-        "tik.prompt": config.tik.prompt,
         "tok.prompt": config.tok.prompt_template,
     }
+    for tik_provider in tik_providers(config.tik):
+        label = "tik.prompt" if len(tik_providers(config.tik)) == 1 else f"tik.providers.{tik_provider.label}.prompt"
+        prompt_sources[label] = tik_provider.prompt
     for label, prompt in prompt_sources.items():
         for term, pattern in FORBIDDEN_RUNTIME_PROMPT_PATTERNS.items():
             if pattern.search(prompt):
@@ -634,6 +780,16 @@ def dump_config_summary(config: GoalConfig) -> str:
         "tik_model": config.tik.model,
         "tik_skill": config.tik.skill,
         "tik_base_url": config.tik.base_url,
+        "tik_providers": [
+            {
+                "label": provider.label,
+                "provider": provider.provider,
+                "model": provider.model,
+                "skill": provider.skill,
+                "base_url": provider.base_url,
+            }
+            for provider in tik_providers(config.tik)
+        ],
         "tok_provider": config.tok.provider,
         "tok_run_cwd": str(config.tok.run_cwd or (config.tok.write_dirs[0] if config.tok.write_dirs else config.root)),
         "write_dirs": [str(path) for path in config.tok.write_dirs],

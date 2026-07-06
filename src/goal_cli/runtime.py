@@ -9,12 +9,13 @@ import signal
 import subprocess
 import time
 import uuid
-from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from .adapters import GoalProviderAdapters, ProductionGoalProviderAdapters
-from .config import GoalConfig, TERMINAL_STATUSES, validate_config
+from .config import GoalConfig, TERMINAL_STATUSES, TikConfig, tik_providers, validate_config
 from .no_mistakes import NO_MISTAKES_BUDGET_EXHAUSTED, NoMistakesGate, NoMistakesResult
 from .observability import (
     GoalTelemetry,
@@ -46,6 +47,20 @@ class RunResult:
 class CleanupResult:
     actions: tuple[str, ...]
     warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class TikProviderReview:
+    label: str
+    provider: str
+    memo_path: Path | None
+    verdict_path: Path | None
+    ledger_path: Path | None
+    verdict: dict[str, Any] | None
+    ready: bool
+    parse_error: bool = False
+    freshness_error: str | None = None
+    error: str | None = None
 
 
 class HeartbeatLockError(RuntimeError):
@@ -246,10 +261,10 @@ class HeartbeatRunner:
             tik_result = self._run_tik(artifact)
             if isinstance(tik_result, RunResult):
                 return tik_result
-            verdict, verdict_path, memo_path, tik_path = tik_result
+            verdict, verdict_path, memo_path, tik_path, reviews = tik_result
 
             ready = tik_is_ready(self.config, verdict)
-            self.state["last_tik"] = tik_state(self.config, self._run_dir(), memo_path, verdict_path, tik_path, artifact, ready)
+            self.state["last_tik"] = tik_state(self.config, self._run_dir(), memo_path, verdict_path, tik_path, artifact, ready, reviews)
             if ready:
                 if self.options.review_only:
                     return self._review_only_passed(artifact)
@@ -266,7 +281,7 @@ class HeartbeatRunner:
 
             if self.options.review_only:
                 return self._review_only(artifact)
-            blocker_result = self._record_blocker(verdict, artifact)
+            blocker_result = self._record_blocker(tik_path, artifact)
             if blocker_result:
                 return blocker_result
 
@@ -390,9 +405,9 @@ class HeartbeatRunner:
             provenance_path.write_text(json.dumps(last_producer, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return artifact
 
-    def _run_tik(self, artifact: dict[str, Any]) -> tuple[dict[str, Any], Path, Path, Path] | RunResult:
+    def _run_tik(self, artifact: dict[str, Any]) -> tuple[dict[str, Any], Path, Path, Path, tuple[TikProviderReview, ...]] | RunResult:
         run_dir = self._run_dir()
-        tik_prompt = render_tik_prompt(self.config, artifact)
+        providers = tik_providers(self.config.tik)
         self._heartbeat("tik_running", run_dir)
         with self.telemetry.span(
             "goal_cli.tik",
@@ -401,59 +416,61 @@ class HeartbeatRunner:
                 "goal.iteration": int(self.state.get("iteration", 0)),
                 "goal.run_dir": rel(self.config, run_dir),
                 "goal.tik.provider": self.config.tik.provider,
+                "goal.tik.providers": [provider.label for provider in providers],
+                "goal.tik.provider_count": len(providers),
                 "goal.artifact.sha256": artifact["sha256"],
             },
         ) as span:
-            outcome = self.adapters.run_tik(self.config, tik_prompt, run_dir, timeout_seconds=remaining_seconds(self.deadline))
-            memo_path = outcome.memo_path
-            if memo_path is None:
+            reviews = self._run_tik_providers(providers, artifact, run_dir)
+            verdict, verdict_path, memo_path, tik_path = aggregate_tik_reviews(self.config, run_dir, artifact, reviews)
+            ready = tik_is_ready(self.config, verdict)
+            failures = [review for review in reviews if review.error]
+            parse_errors = [review for review in reviews if review.parse_error]
+            stale_reviews = [review for review in reviews if review.freshness_error is not None]
+            set_span_attributes(
+                span,
+                {
+                    "goal.tik.ok": not failures and not parse_errors and not stale_reviews,
+                    "goal.tik.memo_path": rel(self.config, memo_path),
+                    "goal.tik.verdict_path": rel(self.config, verdict_path),
+                    "goal.tik.ledger_path": rel(self.config, tik_path),
+                    "goal.tik.parse_error": bool(parse_errors),
+                    "goal.tik.ready": ready,
+                    "goal.tik.failed_providers": [review.label for review in failures],
+                    "goal.tik.stale_providers": [review.label for review in stale_reviews],
+                },
+            )
+            if failures:
                 span.set_attribute("goal.tik.ok", False)
+                self.state["last_tik"] = tik_state(self.config, run_dir, memo_path, verdict_path, tik_path, artifact, False, reviews)
                 return self._finish(
                     1,
                     "blocked_tik_failed",
                     "tik provider failed",
                     phase="tik_failed",
                     event="tik_failed",
-                    blocked_reason="tik provider failed",
+                    blocked_reason="tik provider failed: " + ", ".join(review.label for review in failures),
                     next_action=None,
                     artifact=artifact,
                 )
-
-            verdict, parse_error = parse_tik_verdict(self.config, memo_path)
-            verdict_path = run_dir / "tik_verdict.json"
-            verdict_path.write_text(json.dumps(verdict, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            tik_path = write_tik_ledger(self.config, run_dir, artifact, memo_path, verdict_path, verdict)
-            blockers = verdict.get(self.config.tik.verdict.blockers_field)
-            ready = tik_is_ready(self.config, verdict)
-            set_span_attributes(
-                span,
-                {
-                    "goal.tik.ok": not parse_error,
-                    "goal.tik.memo_path": rel(self.config, memo_path),
-                    "goal.tik.verdict_path": rel(self.config, verdict_path),
-                    "goal.tik.ledger_path": rel(self.config, tik_path),
-                    "goal.tik.parse_error": parse_error,
-                    "goal.tik.ready": ready,
-                    "goal.tik.blocker_count": len(blockers) if isinstance(blockers, list) else None,
-                },
-            )
-            if parse_error:
-                self.state["last_tik"] = tik_state(self.config, run_dir, memo_path, verdict_path, tik_path, artifact, False)
+            if parse_errors:
+                self.state["last_tik"] = tik_state(self.config, run_dir, memo_path, verdict_path, tik_path, artifact, False, reviews)
                 return self._finish(
                     1,
                     "blocked_unparseable_tik",
                     "tik verdict was unparseable",
                     phase="tik_unparseable",
                     event="tik_unparseable",
-                    blocked_reason="tik output was not parseable or did not match configured verdict fields",
+                    blocked_reason="tik output was not parseable or did not match configured verdict fields: "
+                    + ", ".join(review.label for review in parse_errors),
                     next_action=None,
                     artifact=artifact,
                 )
-            freshness_error = tik_freshness_error(verdict, artifact)
-            if freshness_error is not None:
+            if stale_reviews:
+                freshness_error = "; ".join(f"{review.label}: {review.freshness_error}" for review in stale_reviews)
                 span.set_attribute("goal.tik.fresh", False)
                 span.set_attribute("goal.tik.freshness_error", freshness_error)
-                self.state["last_tik"] = tik_state(self.config, run_dir, memo_path, verdict_path, tik_path, artifact, False)
+                self.state["last_tik"] = tik_state(self.config, run_dir, memo_path, verdict_path, tik_path, artifact, False, reviews)
                 return self._finish(
                     1,
                     "blocked_stale_tik_review",
@@ -465,10 +482,69 @@ class HeartbeatRunner:
                     artifact=artifact,
                 )
             span.set_attribute("goal.tik.fresh", True)
-            return verdict, verdict_path, memo_path, tik_path
+            return verdict, verdict_path, memo_path, tik_path, reviews
 
-    def _record_blocker(self, verdict: dict[str, Any], artifact: dict[str, Any]) -> RunResult | None:
-        update_blocker_state(self.config, self.state, verdict)
+    def _run_tik_providers(self, providers: tuple[TikConfig, ...], artifact: dict[str, Any], run_dir: Path) -> tuple[TikProviderReview, ...]:
+        if len(providers) == 1:
+            return (self._run_tik_provider(providers[0], artifact, run_dir, single_provider=True),)
+        results: dict[str, TikProviderReview] = {}
+        with ThreadPoolExecutor(max_workers=len(providers), thread_name_prefix="goal-cli-tik") as executor:
+            futures = {
+                executor.submit(self._run_tik_provider, provider, artifact, run_dir, False): provider.label
+                for provider in providers
+            }
+            for future in as_completed(futures):
+                label = futures[future]
+                try:
+                    results[label] = future.result()
+                except Exception as exc:  # defensive; provider failures should be captured inside _run_tik_provider.
+                    results[label] = TikProviderReview(label, "unknown", None, None, None, None, False, error=f"tik provider raised {type(exc).__name__}: {exc}")
+        return tuple(results[provider.label] for provider in providers)
+
+    def _run_tik_provider(self, tik_provider: TikConfig, artifact: dict[str, Any], run_dir: Path, single_provider: bool) -> TikProviderReview:
+        provider_config = replace(tik_provider, verdict=self.config.tik.verdict, providers=())
+        provider_goal_config = replace(self.config, tik=provider_config)
+        tik_prompt = render_tik_prompt(provider_goal_config, artifact)
+        verdict_path = run_dir / ("tik_verdict.json" if single_provider else f"{tik_provider.label}_verdict.json")
+        ledger_path = run_dir / ("tik.md" if single_provider else f"{tik_provider.label}.md")
+        try:
+            outcome = self.adapters.run_tik(provider_goal_config, tik_prompt, run_dir, timeout_seconds=remaining_seconds(self.deadline))
+        except Exception as exc:
+            failure_path = run_dir / f"{tik_provider.label}_FAILED.txt"
+            failure_path.write_text(f"tik provider raised {type(exc).__name__}: {exc}\n", encoding="utf-8")
+            return TikProviderReview(tik_provider.label, tik_provider.provider, None, None, None, None, False, error=str(exc))
+        memo_path = outcome.memo_path
+        if memo_path is None:
+            return TikProviderReview(tik_provider.label, tik_provider.provider, None, None, None, None, False, error="tik provider failed")
+
+        verdict, parse_error = parse_tik_verdict(self.config, memo_path)
+        verdict_path.write_text(json.dumps(verdict, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        ledger_path = write_tik_ledger(
+            provider_goal_config,
+            run_dir,
+            artifact,
+            memo_path,
+            verdict_path,
+            verdict,
+            tik_path=ledger_path,
+            title="Referee Report" if single_provider else f"Referee Report: {tik_provider.label}",
+        )
+        freshness_error = None if parse_error else tik_freshness_error(verdict, artifact)
+        ready = False if parse_error or freshness_error else tik_is_ready(self.config, verdict)
+        return TikProviderReview(
+            tik_provider.label,
+            tik_provider.provider,
+            memo_path,
+            verdict_path,
+            ledger_path,
+            verdict,
+            ready,
+            parse_error=parse_error,
+            freshness_error=freshness_error,
+        )
+
+    def _record_blocker(self, tik_path: Path, artifact: dict[str, Any]) -> RunResult | None:
+        update_blocker_state(self.config, self.state, tik_path.read_text(encoding="utf-8") if tik_path.exists() else "")
         if self.state.get("status") != "blocked_repeated_same_objection":
             return None
         return self._finish(
@@ -507,6 +583,7 @@ class HeartbeatRunner:
         run_dir = self._run_dir()
         tok_prompt = render_tok_prompt(self.config, artifact, tik_path, run_dir)
         source_before = snapshot_file_scope(self.config, self.config.tok.write_dirs)
+        mutation_before = snapshot_tok_offlimits(self.config)
         artifact_before_tok = artifact_snapshot(self.config)
         self._heartbeat("tok_running", run_dir)
         with self.telemetry.span(
@@ -527,12 +604,16 @@ class HeartbeatRunner:
             tok_report_path = outcome.report_path
             source_after = snapshot_file_scope(self.config, self.config.tok.write_dirs)
             source_changes = source_change_summary(self.config, source_before, source_after, self.config.tok.write_dirs)
+            mutation_after = snapshot_tok_offlimits(self.config)
             artifact_after_tok = artifact_snapshot(self.config)
             artifact_provenance = tok_artifact_provenance(self.config, artifact_before_tok, artifact_after_tok)
+            mutation_audit = tok_mutation_audit(self.config, mutation_before, mutation_after, artifact_provenance)
             source_changes_path = run_dir / "tok_source_changes.json"
             artifact_provenance_path = run_dir / "tok_artifact_provenance.json"
+            mutation_audit_path = run_dir / "tok_mutation_audit.json"
             source_changes_path.write_text(json.dumps(source_changes, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             artifact_provenance_path.write_text(json.dumps(artifact_provenance, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            mutation_audit_path.write_text(json.dumps(mutation_audit, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             if not outcome.ok or tok_report_path is None or outcome.report is None:
                 set_span_attributes(
                     span,
@@ -541,6 +622,8 @@ class HeartbeatRunner:
                         "goal.tok.report_path": rel(self.config, tok_report_path) if tok_report_path else None,
                         "goal.tok.error": outcome.detail,
                         "goal.tok.local_source_change_count": len(source_changes["changed_paths"]),
+                        "goal.tok.artifact_changed_during_tok": artifact_provenance["artifact_changed_during_tok"],
+                        "goal.tok.unexpected_mutation_count": len(mutation_audit["unexpected_changed_paths"]),
                     },
                 )
                 self.state["last_tok_attempt"] = tok_attempt_state(
@@ -552,8 +635,13 @@ class HeartbeatRunner:
                     source_changes,
                     artifact_provenance_path,
                     artifact_provenance,
+                    mutation_audit_path,
+                    mutation_audit,
                     outcome.detail,
                 )
+                safety_result = self._tok_mutation_blocker(mutation_audit, artifact)
+                if safety_result is not None:
+                    return safety_result
                 return self._finish(
                     1,
                     "blocked_tok_failed",
@@ -575,6 +663,7 @@ class HeartbeatRunner:
                     "goal.tok.local_source_change_count": len(source_changes["changed_paths"]),
                     "goal.tok.local_sources_changed": source_changes["changed_paths"],
                     "goal.tok.artifact_changed_during_tok": artifact_provenance["artifact_changed_during_tok"],
+                    "goal.tok.unexpected_mutation_count": len(mutation_audit["unexpected_changed_paths"]),
                 },
             )
             self.state["last_tok"] = tok_state(
@@ -587,7 +676,12 @@ class HeartbeatRunner:
                 source_changes,
                 artifact_provenance_path,
                 artifact_provenance,
+                mutation_audit_path,
+                mutation_audit,
             )
+            safety_result = self._tok_mutation_blocker(mutation_audit, artifact)
+            if safety_result is not None:
+                return safety_result
             if tok_report.get("source_change_possible") is False:
                 return self._finish(
                     1,
@@ -620,6 +714,34 @@ class HeartbeatRunner:
                 next_action="tik",
                 artifact=artifact,
             )
+
+    def _tok_mutation_blocker(self, mutation_audit: dict[str, Any], artifact: dict[str, Any]) -> RunResult | None:
+        if mutation_audit.get("artifact_changed_during_tok"):
+            return self._finish(
+                1,
+                "blocked_tok_direct_artifact_mutation",
+                "tok modified the configured artifact directly",
+                phase="blocked_tok_direct_artifact_mutation",
+                event="blocked_tok_direct_artifact_mutation",
+                blocked_reason="tok modified the configured artifact directly; the artifact must be rebuilt by producer",
+                next_action=None,
+                artifact=artifact,
+            )
+        unexpected_paths = mutation_audit.get("unexpected_changed_paths")
+        if unexpected_paths:
+            preview = ", ".join(str(path) for path in unexpected_paths[:5])
+            extra = "" if len(unexpected_paths) <= 5 else f", and {len(unexpected_paths) - 5} more"
+            return self._finish(
+                1,
+                "blocked_tok_unexpected_mutation",
+                "tok modified paths outside declared scopes",
+                phase="blocked_tok_unexpected_mutation",
+                event="blocked_tok_unexpected_mutation",
+                blocked_reason=f"tok modified paths outside declared scopes: {preview}{extra}",
+                next_action=None,
+                artifact=artifact,
+            )
+        return None
 
     def _finish(
         self,
@@ -795,7 +917,17 @@ def run_producer(config: GoalConfig, run_dir: Path, timeout_seconds: float | Non
 
 def render_prompts_to_run_dir(config: GoalConfig, run_dir: Path, tik_path: Path | None = None) -> None:
     artifact = {"path": rel(config, config.artifact.path), "sha256": "", "size_bytes": 0, "mtime": ""}
-    (run_dir / "tik_prompt.md").write_text(render_tik_prompt(config, artifact), encoding="utf-8")
+    providers = tik_providers(config.tik)
+    if len(providers) == 1:
+        (run_dir / "tik_prompt.md").write_text(render_tik_prompt(replace(config, tik=providers[0]), artifact), encoding="utf-8")
+    else:
+        (run_dir / "tik_prompt.md").write_text(
+            "Dry run placeholder. This goal has multiple tik providers; provider-specific prompts are rendered next to this file.\n",
+            encoding="utf-8",
+        )
+        for provider in providers:
+            provider_config = replace(config, tik=replace(provider, providers=()))
+            (run_dir / f"{provider.label}_prompt.md").write_text(render_tik_prompt(provider_config, artifact), encoding="utf-8")
     if tik_path is None:
         tik_path = run_dir / "tik.md"
         tik_path.write_text(
@@ -841,6 +973,59 @@ def write_tik_review_attachment(run_dir: Path, report_text: str) -> Path:
     return report_path
 
 
+def aggregate_tik_reviews(
+    config: GoalConfig,
+    run_dir: Path,
+    artifact: dict[str, Any],
+    reviews: tuple[TikProviderReview, ...],
+) -> tuple[dict[str, Any], Path, Path, Path]:
+    if len(reviews) == 1:
+        review = reviews[0]
+        if review.verdict is not None and review.verdict_path is not None and review.memo_path is not None and review.ledger_path is not None:
+            return review.verdict, review.verdict_path, review.memo_path, review.ledger_path
+
+    verdict = aggregate_tik_verdict(config, reviews)
+    memo_path = write_aggregate_tik_memo(config, run_dir, reviews)
+    verdict_path = run_dir / "tik_verdict.json"
+    verdict_path.write_text(json.dumps(verdict, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tik_path = write_tik_ledger(config, run_dir, artifact, memo_path, verdict_path, verdict)
+    return verdict, verdict_path, memo_path, tik_path
+
+
+def aggregate_tik_verdict(config: GoalConfig, reviews: tuple[TikProviderReview, ...]) -> dict[str, Any]:
+    provider_results: list[dict[str, Any]] = []
+
+    for review in reviews:
+        provider_results.append(tik_provider_review_state(config, review))
+
+    ready = bool(reviews) and all(review.ready for review in reviews)
+    return {
+        config.tik.verdict.ready_field: ready,
+        "tik_provider_count": len(reviews),
+        "tik_provider_results": provider_results,
+        "_parse_error": any(review.parse_error for review in reviews),
+    }
+
+
+def write_aggregate_tik_memo(config: GoalConfig, run_dir: Path, reviews: tuple[TikProviderReview, ...]) -> Path:
+    memo_path = run_dir / "tik_memo.md"
+    lines = ["# Tik Provider Results", ""]
+    for review in reviews:
+        lines.extend(
+            [
+                f"## {review.label} ({review.provider})",
+                "",
+            ]
+        )
+        if review.memo_path and review.memo_path.exists():
+            lines.append(tik_handoff_text(config, review.memo_path.read_text(encoding="utf-8")))
+        else:
+            lines.append("No narrative review was provided.")
+        lines.append("")
+    memo_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return memo_path
+
+
 def write_tik_ledger(
     config: GoalConfig,
     run_dir: Path,
@@ -848,33 +1033,16 @@ def write_tik_ledger(
     memo_path: Path,
     verdict_path: Path,
     verdict: dict[str, Any],
+    tik_path: Path | None = None,
+    title: str = "Referee Report",
 ) -> Path:
     memo = memo_path.read_text(encoding="utf-8") if memo_path.exists() else ""
-    parsed_tik_json = json.dumps(verdict, ensure_ascii=False, indent=2)
-    tik_path = run_dir / "tik.md"
+    tik_path = tik_path or run_dir / "tik.md"
     body = "\n".join(
         [
-            "# Referee Report",
+            f"# {title}",
             "",
-            f"Goal: {config.name}",
-            f"Run directory: {rel(config, run_dir)}",
-            "",
-            "## Artifact",
-            "",
-            f"- path: {artifact.get('path', rel(config, config.artifact.path))}",
-            f"- sha256: {artifact.get('sha256', '')}",
-            f"- size_bytes: {artifact.get('size_bytes', '')}",
-            f"- mtime: {artifact.get('mtime', '')}",
-            "",
-            "## Review Text",
-            "",
-            memo.strip() or "(empty)",
-            "",
-            "## Parsed Verdict",
-            "",
-            "```json",
-            parsed_tik_json,
-            "```",
+            tik_handoff_text(config, memo),
             "",
         ]
     )
@@ -1065,43 +1233,67 @@ def parse_tik_verdict(config: GoalConfig, memo_path: Path) -> tuple[dict[str, An
     parsed = extract_json_object(memo_text)
     if parsed is None:
         return _parse_error_verdict(config, "Tik did not return parseable JSON.", memo_path), True
-    for field in config.tik.verdict.required_fields:
-        if field not in parsed:
-            return _parse_error_verdict(config, f"Tik JSON missing required field: {field}", memo_path), True
+    for required_field in config.tik.verdict.required_fields:
+        if required_field not in parsed:
+            return _parse_error_verdict(config, f"Tik JSON missing required field: {required_field}", memo_path), True
     ready = parsed.get(config.tik.verdict.ready_field)
-    blockers = parsed.get(config.tik.verdict.blockers_field)
     if not isinstance(ready, bool):
         return _parse_error_verdict(config, f"{config.tik.verdict.ready_field} must be boolean", memo_path), True
-    if not isinstance(blockers, list):
-        return _parse_error_verdict(config, f"{config.tik.verdict.blockers_field} must be a list", memo_path), True
-    parsed["_parse_error"] = False
-    return parsed, False
+    verdict = {config.tik.verdict.ready_field: ready, "_parse_error": False}
+    for verdict_field in (
+        "review_matches_current_pdf",
+        "review_matches_current_artifact",
+        "reviewed_pdf_sha256",
+        "reviewed_artifact_sha256",
+        "reviewed_sha256",
+        "current_pdf_sha256",
+        "current_artifact_sha256",
+        "current_sha256",
+    ):
+        if verdict_field in parsed:
+            verdict[verdict_field] = parsed[verdict_field]
+    return verdict, False
 
 
 def extract_json_object(text: str) -> dict[str, Any] | None:
-    candidates: list[str] = []
-    for match in re.finditer(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL | re.IGNORECASE):
-        candidates.append(match.group(1))
+    extracted = extract_json_object_with_span(text)
+    return extracted[0] if extracted else None
+
+
+def extract_json_object_with_span(text: str) -> tuple[dict[str, Any], tuple[int, int]] | None:
+    candidates: list[tuple[str, int, int]] = []
+    for match in re.finditer(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.DOTALL | re.IGNORECASE):
+        candidates.append((match.group(1).strip(), match.start(0), match.end(0)))
     stripped = text.strip()
     if stripped.startswith("{") and stripped.endswith("}"):
-        candidates.append(stripped)
+        start = text.find(stripped)
+        candidates.append((stripped, start, start + len(stripped)))
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end > start:
-        candidates.append(text[start : end + 1])
-    for candidate in candidates:
+        candidates.append((text[start : end + 1], start, end + 1))
+    for candidate, span_start, span_end in candidates:
         try:
             parsed = json.loads(candidate)
         except json.JSONDecodeError:
             continue
         if isinstance(parsed, dict):
-            return parsed
+            return parsed, (span_start, span_end)
     return None
 
 
+def tik_handoff_text(config: GoalConfig, text: str) -> str:
+    _ = config
+    extracted = extract_json_object_with_span(text)
+    if extracted:
+        _, (start, end) = extracted
+        text = f"{text[:start]}{text[end:]}"
+    cleaned = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return cleaned or "No narrative review was provided."
+
+
 def tik_is_ready(config: GoalConfig, verdict: dict[str, Any]) -> bool:
-    blockers = verdict.get(config.tik.verdict.blockers_field)
-    return verdict.get(config.tik.verdict.ready_field) is True and isinstance(blockers, list) and not blockers
+    return verdict.get(config.tik.verdict.ready_field) is True
 
 
 def tik_freshness_error(verdict: dict[str, Any], artifact: dict[str, Any]) -> str | None:
@@ -1139,8 +1331,8 @@ def _freshness_message(artifact_sha: str, reviewed_sha: str | None, current_sha:
     return "; ".join(parts)
 
 
-def update_blocker_state(config: GoalConfig, state: dict[str, Any], verdict: dict[str, Any]) -> None:
-    fingerprint = blocker_fingerprint(config, verdict)
+def update_blocker_state(config: GoalConfig, state: dict[str, Any], review_text: str) -> None:
+    fingerprint = blocker_fingerprint(review_text)
     if state.get("blocker_fingerprint") == fingerprint:
         repeats = int(state.get("consecutive_blocker_count", 0)) + 1
     else:
@@ -1156,16 +1348,17 @@ def update_blocker_state(config: GoalConfig, state: dict[str, Any], verdict: dic
         state["next_action"] = "tok"
 
 
-def blocker_fingerprint(config: GoalConfig, verdict: dict[str, Any]) -> str:
-    parts: list[str] = []
-    for field in config.tik.verdict.fingerprint_fields:
-        value = verdict.get(field)
-        if value is not None:
-            parts.append(json.dumps(value, ensure_ascii=False, sort_keys=True))
-    if not parts:
-        parts.append(json.dumps(verdict, ensure_ascii=False, sort_keys=True))
-    normalized = re.sub(r"\s+", " ", "\n".join(parts).lower()).strip()
+def blocker_fingerprint(review_text: str) -> str:
+    normalized = re.sub(r"\s+", " ", tik_handoff_text_for_fingerprint(review_text).lower()).strip() or "tik-not-ready"
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def tik_handoff_text_for_fingerprint(review_text: str) -> str:
+    extracted = extract_json_object_with_span(review_text)
+    if not extracted:
+        return review_text
+    _, (start, end) = extracted
+    return f"{review_text[:start]}{review_text[end:]}"
 
 
 def artifact_metadata(config: GoalConfig, path: Path) -> dict[str, Any]:
@@ -1211,6 +1404,44 @@ def snapshot_file_scope(config: GoalConfig, scopes: tuple[Path, ...]) -> dict[st
     return snapshot
 
 
+def snapshot_tok_offlimits(config: GoalConfig) -> dict[str, dict[str, Any]]:
+    root = config.root.resolve(strict=False)
+    allowed_scopes = _resolved_scopes(
+        (
+            *config.tok.write_dirs,
+            *config.tok.runtime_write_dirs,
+            config.state_dir,
+            config.runs_dir,
+        )
+    )
+    skipped_scopes = (*allowed_scopes, (root / ".git").resolve(strict=False))
+    snapshot: dict[str, dict[str, Any]] = {}
+    if not root.exists():
+        return snapshot
+    for current_root, dirnames, filenames in os.walk(root):
+        current_path = Path(current_root)
+        current_resolved = current_path.resolve(strict=False)
+        if _path_in_any_scope(current_resolved, skipped_scopes):
+            dirnames[:] = []
+            continue
+        dirnames[:] = [
+            dirname
+            for dirname in dirnames
+            if not _path_in_any_scope((current_path / dirname).resolve(strict=False), skipped_scopes)
+        ]
+        for filename in sorted(filenames):
+            path = current_path / filename
+            if not path.is_file():
+                continue
+            stat = path.stat()
+            snapshot[rel(config, path)] = {
+                "sha256": sha256_file(path),
+                "size_bytes": stat.st_size,
+                "mtime": dt.datetime.fromtimestamp(stat.st_mtime, dt.UTC).replace(microsecond=0).isoformat(),
+            }
+    return snapshot
+
+
 def source_change_summary(
     config: GoalConfig,
     before: dict[str, dict[str, Any]],
@@ -1240,6 +1471,30 @@ def source_change_summary(
     }
 
 
+def tok_mutation_audit(
+    config: GoalConfig,
+    before: dict[str, dict[str, Any]],
+    after: dict[str, dict[str, Any]],
+    artifact_provenance: dict[str, Any],
+) -> dict[str, Any]:
+    changes = source_change_summary(config, before, after, ())
+    protected_scopes = _tok_protected_scopes(config)
+    protected_changed = [
+        path
+        for path in changes["changed_paths"]
+        if _path_in_any_scope((config.root / path).resolve(strict=False), protected_scopes)
+    ]
+    unexpected_changed = changes["changed_paths"]
+    return {
+        "allowed_scopes": [rel(config, path) for path in _tok_allowed_scopes(config)],
+        "protected_scopes": [rel(config, path) for path in protected_scopes],
+        "artifact_changed_during_tok": bool(artifact_provenance.get("artifact_changed_during_tok")),
+        "unexpected_changed_paths": unexpected_changed,
+        "protected_changed_paths": protected_changed,
+        "changes": changes,
+    }
+
+
 def tok_artifact_provenance(config: GoalConfig, before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     before_sha = before.get("sha256") if before.get("exists") else None
     after_sha = after.get("sha256") if after.get("exists") else None
@@ -1250,14 +1505,40 @@ def tok_artifact_provenance(config: GoalConfig, before: dict[str, Any], after: d
     }
 
 
-def tik_state(config: GoalConfig, run_dir: Path, memo_path: Path, verdict_path: Path, tik_path: Path, artifact: dict[str, Any], ready: bool) -> dict[str, Any]:
-    return {
+def tik_state(
+    config: GoalConfig,
+    run_dir: Path,
+    memo_path: Path,
+    verdict_path: Path,
+    tik_path: Path,
+    artifact: dict[str, Any],
+    ready: bool,
+    reviews: tuple[TikProviderReview, ...] = (),
+) -> dict[str, Any]:
+    state = {
         "run_dir": rel(config, run_dir),
         "memo_path": rel(config, memo_path),
         "verdict_path": rel(config, verdict_path),
         "ledger_path": rel(config, tik_path),
         "artifact_sha256": artifact["sha256"],
         "artifact_ready": ready,
+    }
+    if reviews:
+        state["providers"] = [tik_provider_review_state(config, review) for review in reviews]
+    return state
+
+
+def tik_provider_review_state(config: GoalConfig, review: TikProviderReview) -> dict[str, Any]:
+    return {
+        "label": review.label,
+        "provider": review.provider,
+        "memo_path": rel(config, review.memo_path) if review.memo_path else None,
+        "verdict_path": rel(config, review.verdict_path) if review.verdict_path else None,
+        "ledger_path": rel(config, review.ledger_path) if review.ledger_path else None,
+        "artifact_ready": review.ready,
+        "parse_error": review.parse_error,
+        "freshness_error": review.freshness_error,
+        "error": review.error,
     }
 
 
@@ -1286,6 +1567,8 @@ def tok_state(
     source_changes: dict[str, Any],
     artifact_provenance_path: Path,
     artifact_provenance: dict[str, Any],
+    mutation_audit_path: Path,
+    mutation_audit: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "run_dir": rel(config, run_dir),
@@ -1297,6 +1580,8 @@ def tok_state(
         "actual_sources_changed": source_changes["changed_paths"],
         "artifact_provenance_path": rel(config, artifact_provenance_path),
         "artifact_provenance": artifact_provenance,
+        "mutation_audit_path": rel(config, mutation_audit_path),
+        "mutation_audit": mutation_audit,
         "expected_artifact_visible_improvement": report.get("expected_artifact_visible_improvement", []),
         "remaining_artifact_bottleneck": report.get("remaining_artifact_bottleneck", ""),
     }
@@ -1311,6 +1596,8 @@ def tok_attempt_state(
     source_changes: dict[str, Any],
     artifact_provenance_path: Path,
     artifact_provenance: dict[str, Any],
+    mutation_audit_path: Path,
+    mutation_audit: dict[str, Any],
     error: str,
 ) -> dict[str, Any]:
     return {
@@ -1322,6 +1609,8 @@ def tok_attempt_state(
         "actual_sources_changed": source_changes["changed_paths"],
         "artifact_provenance_path": rel(config, artifact_provenance_path),
         "artifact_provenance": artifact_provenance,
+        "mutation_audit_path": rel(config, mutation_audit_path),
+        "mutation_audit": mutation_audit,
         "error": error,
     }
 
@@ -1346,6 +1635,55 @@ def rel(config: GoalConfig, path: Path) -> str:
         return str(path)
 
 
+def _tok_allowed_scopes(config: GoalConfig) -> tuple[Path, ...]:
+    return _resolved_scopes(
+        (
+            *config.tok.write_dirs,
+            *config.tok.runtime_write_dirs,
+            config.state_dir,
+            config.runs_dir,
+        )
+    )
+
+
+def _tok_protected_scopes(config: GoalConfig) -> tuple[Path, ...]:
+    return _resolved_scopes(
+        (
+            config.root / ".git",
+            config.path,
+            config.artifact.path,
+            *config.safety.generated_dirs,
+        )
+    )
+
+
+def _resolved_scopes(paths: tuple[Path, ...]) -> tuple[Path, ...]:
+    resolved: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        candidate = path.resolve(strict=False)
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved.append(candidate)
+    return tuple(resolved)
+
+
+def _path_in_any_scope(path: Path, scopes: tuple[Path, ...]) -> bool:
+    resolved = path.resolve(strict=False)
+    for scope in scopes:
+        scope_resolved = scope.resolve(strict=False)
+        if resolved == scope_resolved:
+            return True
+        try:
+            resolved.relative_to(scope_resolved)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
 def remaining_seconds(deadline: float | None) -> float | None:
     if deadline is None:
         return None
@@ -1355,13 +1693,7 @@ def remaining_seconds(deadline: float | None) -> float | None:
 def _parse_error_verdict(config: GoalConfig, message: str, memo_path: Path) -> dict[str, Any]:
     return {
         config.tik.verdict.ready_field: False,
-        config.tik.verdict.blockers_field: [
-            {
-                "severity": "blocking",
-                "objection": message,
-                "artifact_evidence": f"See raw tik memo: {memo_path}",
-            }
-        ],
-        "central_bottleneck": "Tik output could not be used by the runtime.",
+        "error": message,
+        "memo_path": str(memo_path),
         "_parse_error": True,
     }

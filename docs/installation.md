@@ -7,8 +7,11 @@ repository, then pointed at a project-specific `goal.toml`.
 
 - Python 3.11 or newer.
 - Git.
-- Codex CLI on `PATH` when `tok.provider = "codex_goal"` or `tik.provider = "codex_file"`.
+- Codex CLI on `PATH` when `tok.provider = "codex_goal"`,
+  `tok.provider = "codex_app_server"`, or `tik.provider = "codex_file"`.
 - Claude Code CLI (`claude`) on `PATH` when `tok.provider = "claude_code_goal"` or `tik.provider = "claude_code_file"`.
+- The configured review command on `PATH` or as an existing project script when
+  `tik.provider = "oracle"` or `tik.provider = "checklist"`.
 - `PACKYAPI_API_KEY`, `PACKYCODE_CODEX_KEY`, `OPENAI_API_KEY`, or
   `~/.config/goal-cli/api.env` when `tik.provider = "api"`.
 - `no-mistakes`.
@@ -184,8 +187,9 @@ Then edit `goal.toml` so:
 
 - `[artifact].path` is the one canonical product.
 - `[producer].command` rebuilds that artifact from sources.
-- `[tik]` either runs a deterministic oracle command, an API-backed file-upload
-  review, or a Codex local-file review.
+- `[tik]` uses one or more providers: deterministic `oracle`, command-backed
+  `checklist`, API-backed file-upload review, Codex local-file review, or
+  Claude Code local-file review.
 - `[tok].write_dirs` contains the source directories that count as valid tok edits.
 - `[tok].run_cwd`, when set, is where the tok process starts commands.
 - `[tok].runtime_write_dirs` contains generated directories that commands may
@@ -339,6 +343,13 @@ Prove the Codex tok path in a temporary workspace:
 goal-cli doctor --smoke-codex-goal
 ```
 
+For `tok.provider = "codex_app_server"`, prove the Codex app-server tok path
+instead:
+
+```bash
+goal-cli doctor --smoke-codex-app-server
+```
+
 For `tok.provider = "claude_code_goal"`, prove the Claude Code tok path instead:
 
 ```bash
@@ -349,6 +360,8 @@ For `tik.provider = "codex_file"`, prove the local-file tik path too:
 
 ```bash
 goal-cli doctor --smoke-codex-goal --smoke-codex-file-tik
+# or, with tok.provider = "codex_app_server":
+goal-cli doctor --smoke-codex-app-server --smoke-codex-file-tik
 ```
 
 For `tik.provider = "claude_code_file"`:
@@ -356,6 +369,9 @@ For `tik.provider = "claude_code_file"`:
 ```bash
 goal-cli doctor --smoke-codex-goal --smoke-claude-code-file-tik
 ```
+
+For `tik.provider = "oracle"` or `tik.provider = "checklist"`, `goal-cli doctor`
+checks the configured command by default; no extra smoke flag is needed.
 
 Run one heartbeat:
 

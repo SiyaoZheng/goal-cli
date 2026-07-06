@@ -348,11 +348,11 @@ class RevisionAdapters:
     def run_tik(self, config, prompt, run_dir, timeout_seconds=None) -> TikOutcome:
         memo_path = run_dir / "tik_memo.md"
         memo_path.write_text(
+            "Review: artifact still says draft.\n"
+            +
             json.dumps(
                 {
                     "artifact_ready": False,
-                    "central_bottleneck": "artifact still says draft",
-                    "blocking_objections": [{"severity": "blocking", "objection": "draft artifact"}],
                 }
             )
             + "\n",

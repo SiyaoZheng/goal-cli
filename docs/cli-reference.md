@@ -58,7 +58,9 @@ options:
 ## Doctor
 
 ```text
-usage: goal-cli doctor [-h] [--smoke-codex-goal] [--smoke-claude-code-goal]
+usage: goal-cli doctor [-h] [--smoke-codex-goal]
+                       [--smoke-codex-app-server]
+                       [--smoke-claude-code-goal]
                        [--smoke-codex-file-tik] [--smoke-claude-code-file-tik]
                        [--skip-openai-auth]
                        [--timeout-seconds TIMEOUT_SECONDS]
@@ -71,6 +73,9 @@ options:
   -h, --help            show this help message and exit
   --smoke-codex-goal    Run a minimal Codex /goal schema-output smoke check in
                         a temp directory
+  --smoke-codex-app-server
+                        Run a minimal Codex app-server stdio tok smoke check
+                        in a temp directory
   --smoke-claude-code-goal
                         Run a minimal Claude Code structured-output tok smoke
                         check in a temp directory
@@ -82,11 +87,14 @@ options:
                         in a temp directory
   --skip-openai-auth    Skip API key readiness check for API tik configs
   --timeout-seconds TIMEOUT_SECONDS
-                        Timeout for setup probes except optional Codex smoke
-                        checks
+                        Timeout for setup probes except optional provider
+                        smoke checks
   --smoke-timeout-seconds SMOKE_TIMEOUT_SECONDS
-                        Timeout for optional Codex smoke checks
+                        Timeout for optional provider smoke checks
 ```
+
+Command-backed tik providers (`oracle` and `checklist`) are covered by the
+default static command checks. There is no separate checklist smoke flag.
 
 ## Tik
 
@@ -188,7 +196,7 @@ options:
 | --- | --- |
 | `goal-cli init` | Create a starter artifact `goal.toml`; refuses to overwrite an existing config. |
 | `goal-cli validate` | Load config and print a JSON summary if config policy passes. |
-| `goal-cli doctor` | Run static readiness probes and optional Codex smoke checks. |
+| `goal-cli doctor` | Run static readiness probes and optional provider smoke checks. |
 | `goal-cli run` | Execute exactly one heartbeat. |
 | `goal-cli tik` | Run producer plus tik only; do not invoke tok. |
 | `goal-cli heartbeat install` | Install a per-user OS timer for repeated one-heartbeat ticks. |

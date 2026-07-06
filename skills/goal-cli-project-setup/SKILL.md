@@ -238,6 +238,15 @@ provider = "oracle"
 command = "python3 scripts/tik.py"
 ```
 
+Use `checklist` when a project script runs a checklist-style review and should
+appear as a distinct tik provider:
+
+```toml
+[tik]
+provider = "checklist"
+command = "python3 scripts/checklist_review.py"
+```
+
 Use `codex_file` when a local Codex artifact review is appropriate and the
 artifact is a file:
 
@@ -279,8 +288,7 @@ JSON verdict that includes at least:
 
 ```json
 {
-  "artifact_ready": false,
-  "blocking_objections": []
+  "artifact_ready": false
 }
 ```
 
@@ -307,6 +315,17 @@ Use `claude_code_goal` for the same pass through Claude Code; it needs the
 ```toml
 [tok]
 provider = "claude_code_goal"
+sandbox = "workspace-write"
+write_dirs = ["src", "writing"]
+```
+
+Use `codex_app_server` when the Codex tok pass should go through
+`codex app-server --stdio` and a real app-server thread goal instead of
+`codex exec`:
+
+```toml
+[tok]
+provider = "codex_app_server"
 sandbox = "workspace-write"
 write_dirs = ["src", "writing"]
 ```
@@ -355,9 +374,7 @@ max_output_tokens = 4096
 
 [tik.verdict]
 ready_field = "artifact_ready"
-blockers_field = "blocking_objections"
-required_fields = ["artifact_ready", "blocking_objections"]
-fingerprint_fields = ["blocking_objections"]
+required_fields = ["artifact_ready"]
 
 [tok]
 provider = "codex_goal"
@@ -398,6 +415,12 @@ If using Codex tok:
 goal-cli doctor --smoke-codex-goal
 ```
 
+If using `tok.provider = "codex_app_server"`:
+
+```bash
+goal-cli doctor --smoke-codex-app-server
+```
+
 If using `tik.provider = "codex_file"`:
 
 ```bash
@@ -409,6 +432,9 @@ If using `tik.provider = "claude_code_file"`:
 ```bash
 goal-cli doctor --smoke-claude-code-file-tik
 ```
+
+If using `tik.provider = "oracle"` or `tik.provider = "checklist"`, the default
+doctor run checks the configured command.
 
 If using `tok.provider = "claude_code_goal"`:
 
@@ -462,8 +488,8 @@ Use these rules when setup does not pass on the first attempt:
   to tik/tok.
 - artifact missing or empty: fix the producer or artifact path; do not lower the
   standard.
-- Codex smoke checks fail: report the exact smoke check failure and leave the
-  next command as a setup repair command, not a heartbeat.
+- Provider smoke checks fail: report the exact smoke check failure and leave
+  the next command as a setup repair command, not a heartbeat.
 - no-mistakes missing: install it or report it; do not silently set
   `[no_mistakes].enabled = false` for a normal user setup.
 
@@ -507,7 +533,7 @@ Use these rules when setup does not pass on the first attempt:
 - `goal-cli validate` passes.
 - `goal-cli doctor` reports the configured static setup as ready or the
   remaining blocker is documented with exact output.
-- Optional Codex smoke checks pass when their providers are configured.
+- Optional provider smoke checks pass when their providers are configured.
 - The final response to the user names the artifact, producer command,
   verifier used, writable scopes, and exact next command. If unattended progress
   is appropriate, the next command should be `goal-cli heartbeat install ...`;

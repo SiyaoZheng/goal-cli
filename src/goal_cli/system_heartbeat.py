@@ -237,6 +237,7 @@ def build_system_heartbeat_layout(config: GoalConfig, options: SystemHeartbeatOp
         tick_args=tick_args,
         files=(),
     )
+    files: tuple[ManagedFile, ...]
     if manager == MANAGER_LAUNCHD:
         files = (ManagedFile(_launchd_path(label), render_launchd_plist(base_layout)),)
     else:

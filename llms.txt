@@ -90,12 +90,15 @@ goal-cli -h
 5. Create or update `goal.toml`.
 6. Choose the smallest useful tik:
    - deterministic `oracle` when a script can reject bad output;
+   - command-backed `checklist` when a checklist runner should appear as its
+     own tik provider;
    - `codex_file` when Codex can review a local artifact file;
    - `claude_code_file` when Claude Code can review a local artifact file;
    - `api` only when OpenAI-compatible file upload is intended and credentials exist.
 7. Configure `tok` with narrow source `write_dirs` as the audited source-change
    scope, `run_cwd = "."` when useful, and generated `runtime_write_dirs` only
-   for command side effects. Pick `codex_goal` (Codex) or `claude_code_goal`
+   for command side effects. Pick `codex_goal` (Codex exec),
+   `codex_app_server` (Codex app-server stdio), or `claude_code_goal`
    (Claude Code) as the provider.
 8. Put generated output folders in `[safety].generated_dirs`.
 
@@ -114,6 +117,12 @@ If using Codex tok:
 goal-cli doctor --smoke-codex-goal
 ```
 
+If using `tok.provider = "codex_app_server"`:
+
+```bash
+goal-cli doctor --smoke-codex-app-server
+```
+
 If using `tok.provider = "claude_code_goal"`:
 
 ```bash
@@ -124,6 +133,8 @@ If using `tik.provider = "codex_file"`:
 
 ```bash
 goal-cli doctor --smoke-codex-goal --smoke-codex-file-tik
+# or, with tok.provider = "codex_app_server":
+goal-cli doctor --smoke-codex-app-server --smoke-codex-file-tik
 ```
 
 If using `tik.provider = "claude_code_file"`:
@@ -131,6 +142,9 @@ If using `tik.provider = "claude_code_file"`:
 ```bash
 goal-cli doctor --smoke-claude-code-file-tik
 ```
+
+If using `tik.provider = "oracle"` or `tik.provider = "checklist"`, the default
+doctor run checks the configured command.
 
 Combine the tok and tik smoke flags that match the configured providers; the
 all-Claude stack is `--smoke-claude-code-goal --smoke-claude-code-file-tik`.

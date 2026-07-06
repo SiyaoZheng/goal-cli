@@ -10,11 +10,12 @@ import tempfile
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from .config import (
     API_TIK_BASE_URL_ENV_VARS,
     API_TIK_KEY_ENV_VARS,
+    COMMAND_TIK_PROVIDERS,
     DEFAULT_API_TIK_BASE_URL,
     DEFAULT_API_TIK_MODEL,
     GoalConfig,
@@ -22,6 +23,9 @@ from .config import (
     api_tik_value_source,
     resolve_tik_skill_path,
 )
+
+if TYPE_CHECKING:
+    from .tok_execution import TokExecutionResult
 
 
 @dataclass(frozen=True)
@@ -58,7 +62,7 @@ class ProductionGoalProviderAdapters:
                 config.artifact.path,
                 prompt,
                 run_dir,
-                "tik",
+                config.tik.label,
                 config.artifact.copy_as,
                 timeout_seconds=timeout_seconds,
             )
@@ -141,7 +145,7 @@ def run_tik(
 ) -> Path | None:
     output_path = run_dir / f"{label}_memo.md"
     (run_dir / f"{label}_prompt.md").write_text(prompt, encoding="utf-8")
-    if config.provider == "oracle":
+    if config.provider in COMMAND_TIK_PROVIDERS:
         env = {
             "GOAL_ARTIFACT": str(artifact_path),
             "GOAL_TIK_PROMPT": prompt,

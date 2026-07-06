@@ -109,6 +109,50 @@ class SetupCheckTests(unittest.TestCase):
             self.assertIn("does not show --ephemeral", self._detail(checks, "codex.exec.--ephemeral"))
             self.assertIn("codex.exec.--ephemeral", self._detail(checks, "one_click_artifact_loop"))
 
+    def test_doctor_checks_every_parallel_oracle_tik_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_project(root)
+            self._install_fake_codex(root)
+            config_path = root / "goal.toml"
+            config_path.write_text(
+                config_path.read_text(encoding="utf-8").replace(
+                    '[tik]\nprovider = "oracle"\ncommand = "python3 scripts/tik.py"',
+                    textwrap.dedent(
+                        """
+                        [tik]
+
+                        [[tik.providers]]
+                        label = "alpha"
+                        provider = "oracle"
+                        command = "python3 scripts/tik.py"
+
+                        [[tik.providers]]
+                        label = "beta"
+                        provider = "oracle"
+                        command = "python3 scripts/missing_tik.py"
+                        """
+                    ).strip(),
+                ),
+                encoding="utf-8",
+            )
+
+            checks = run_doctor(load_config(config_path))
+
+            self.assertEqual(doctor_exit_code(checks), 1)
+            self.assertIn("command script does not exist", self._detail(checks, "tik.providers.beta.command"))
+
+    def test_doctor_checks_checklist_tik_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_project(root, tik_provider="checklist")
+            self._install_fake_codex(root)
+
+            checks = run_doctor(load_config(root / "goal.toml"))
+
+            self.assertEqual(doctor_exit_code(checks), 0, checks)
+            self.assertIn("command executable found", self._detail(checks, "tik.command"))
+
     def test_codex_goal_smoke_uses_temp_workspace_and_validates_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -121,6 +165,23 @@ class SetupCheckTests(unittest.TestCase):
 
             self.assertEqual(doctor_exit_code(checks), 0, checks)
             self.assertIn("schema-valid tok report", self._detail(checks, "codex_goal.smoke"))
+            self.assertEqual(self._detail(checks, "one_click_artifact_loop"), "ready for one-prompt goal-cli run")
+            self.assertEqual(project_source.read_text(encoding="utf-8"), before)
+
+    def test_codex_app_server_smoke_uses_temp_workspace_and_validates_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_project(root, tok_provider="codex_app_server")
+            self._install_fake_codex(root)
+            project_source = root / "src" / "source.txt"
+            before = project_source.read_text(encoding="utf-8")
+
+            checks = run_doctor(load_config(root / "goal.toml"), DoctorOptions(smoke_codex_app_server=True))
+
+            self.assertEqual(doctor_exit_code(checks), 0, checks)
+            self.assertIn("codex app-server --help succeeded", self._detail(checks, "codex.app_server.help"))
+            self.assertIn("codex app-server supports --stdio", self._detail(checks, "codex.app_server.--stdio"))
+            self.assertIn("schema-valid tok report", self._detail(checks, "codex_app_server.smoke"))
             self.assertEqual(self._detail(checks, "one_click_artifact_loop"), "ready for one-prompt goal-cli run")
             self.assertEqual(project_source.read_text(encoding="utf-8"), before)
 
@@ -269,6 +330,14 @@ class SetupCheckTests(unittest.TestCase):
                 provider = "claude_code_file"
                 """
             ).strip()
+        elif tik_provider == "checklist":
+            tik_table = textwrap.dedent(
+                """
+                [tik]
+                provider = "checklist"
+                command = "python3 scripts/tik.py"
+                """
+            ).strip()
         else:
             tik_table = textwrap.dedent(
                 """
@@ -334,6 +403,48 @@ generated_dirs = ["output", "build"]
                 if args in (["exec", "--help"], ["exec", "--enable", "goals", "--help"]):
                     print({help_text!r})
                     raise SystemExit(0)
+                if args == ["app-server", "--help"]:
+                    print("--stdio generate-ts generate-json-schema")
+                    raise SystemExit(0)
+                if args == ["app-server", "--stdio"]:
+                    report = {{
+                        "source_change_possible": True,
+                        "revision_strategy": "write temporary smoke file through app-server",
+                        "expected_artifact_visible_improvement": ["codex_app_server can emit schema-shaped reports"],
+                        "remaining_artifact_bottleneck": "none for setup smoke"
+                    }}
+
+                    def respond(request_id, result):
+                        print(json.dumps({{"id": request_id, "result": result}}), flush=True)
+
+                    for line in sys.stdin:
+                        message = json.loads(line)
+                        method = message["method"]
+                        request_id = message["id"]
+                        params = message.get("params") or {{}}
+                        if method == "initialize":
+                            respond(request_id, {{"userAgent": "fake-codex-app-server"}})
+                        elif method == "thread/start":
+                            assert params["approvalPolicy"] == "never"
+                            assert params["ephemeral"] is True
+                            respond(request_id, {{"thread": {{"id": "thread-1"}}}})
+                        elif method == "thread/goal/set":
+                            assert params["threadId"] == "thread-1"
+                            respond(request_id, {{"goal": {{"threadId": "thread-1", "objective": params["objective"], "status": "active"}}}})
+                        elif method == "turn/start":
+                            assert params["outputSchema"]["properties"]["source_change_possible"]["type"] == "boolean"
+                            assert "Doctor smoke check for goal-cli setup readiness" in params["input"][0]["text"]
+                            Path(params["cwd"], "doctor-smoke.txt").write_text("ok\\n", encoding="utf-8")
+                            respond(request_id, {{"turn": {{"id": "turn-1", "status": "inProgress", "items": []}}}})
+                            print(json.dumps({{
+                                "method": "turn/completed",
+                                "params": {{"threadId": "thread-1", "turn": {{"id": "turn-1", "status": "completed", "items": []}}}}
+                            }}), flush=True)
+                        elif method == "thread/read":
+                            respond(request_id, {{"thread": {{"id": "thread-1", "turns": [{{"items": [{{"type": "agentMessage", "id": "agent-1", "text": json.dumps(report), "phase": None, "memoryCitation": None}}]}}]}}}})
+                        else:
+                            raise SystemExit(f"unexpected method: {{method}}")
+                    raise SystemExit(0)
 
                 output_path = Path(args[args.index("--output-last-message") + 1])
                 workspace = Path(args[args.index("-C") + 1])
@@ -359,14 +470,7 @@ generated_dirs = ["output", "build"]
                 assert "Doctor smoke check for goal-cli codex_file tik readiness" in prompt
                 assert "doctor-artifact.txt" in prompt
                 output_path.write_text(json.dumps({{
-                    "artifact_ready": False,
-                    "central_bottleneck": "doctor smoke bottleneck",
-                    "blocking_objections": [{{
-                        "severity": "blocking",
-                        "objection": "doctor smoke objection",
-                        "artifact_evidence": "doctor-artifact.txt"
-                    }}],
-                    "required_next_artifact_changes": ["doctor smoke change"]
+                    "artifact_ready": False
                 }}) + "\\n", encoding="utf-8")
                 """
             ).strip()
@@ -428,14 +532,7 @@ generated_dirs = ["output", "build"]
                 assert "Doctor smoke check for goal-cli claude_code_file tik readiness" in prompt
                 assert "doctor-artifact.txt" in prompt
                 memo = json.dumps({{
-                    "artifact_ready": False,
-                    "central_bottleneck": "doctor smoke bottleneck",
-                    "blocking_objections": [{{
-                        "severity": "blocking",
-                        "objection": "doctor smoke objection",
-                        "artifact_evidence": "doctor-artifact.txt"
-                    }}],
-                    "required_next_artifact_changes": ["doctor smoke change"]
+                    "artifact_ready": False
                 }})
                 print(json.dumps({{"type": "result", "subtype": "success", "is_error": False, "result": memo}}))
                 """
