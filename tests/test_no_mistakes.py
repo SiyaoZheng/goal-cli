@@ -119,7 +119,7 @@ class NoMistakesIntegrationTests(unittest.TestCase):
                 "rebase,review,test,document,lint,push,pr,ci",
             )
 
-    def test_no_mistakes_gate_is_capped_by_run_deadline(self) -> None:
+    def test_no_mistakes_checkpoint_is_capped_by_run_deadline(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             fake_log = root / ".goal" / "fake-no-mistakes.jsonl"
@@ -141,7 +141,7 @@ class NoMistakesIntegrationTests(unittest.TestCase):
             self.assertEqual(state["status"], "active")
             self.assertEqual(state["next_action"], "tik")
             self.assertEqual(state["last_no_mistakes"]["status"], "no_mistakes_budget_exhausted")
-            self.assertIn("no_mistakes_gate_failed_ignored", [entry["event"] for entry in state["history"]])
+            self.assertIn("no_mistakes_checkpoint_failed_ignored", [entry["event"] for entry in state["history"]])
             time.sleep(1.0)
             self.assertFalse(child_marker.exists())
 

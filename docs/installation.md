@@ -308,7 +308,7 @@ timeout_seconds = 5
 ```
 
 Each heartbeat emits spans for heartbeat progress, producer, artifact load,
-tik, tok, and no-mistakes gate. `goal-cli` does not include a collector,
+tik, tok, and no-mistakes checkpoint. `goal-cli` does not include a collector,
 database, queue, dashboard, or trace storage; those are supplied by the OTLP
 backend.
 

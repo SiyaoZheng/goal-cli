@@ -748,7 +748,7 @@ class HeartbeatRunner:
 
         self._heartbeat("no_mistakes_running", self._run_dir())
         with self.telemetry.span(
-            "goal_cli.no_mistakes.gate",
+            "goal_cli.no_mistakes.checkpoint",
             {
                 "goal.name": self.config.name,
                 "goal.iteration": int(self.state.get("iteration", 0)),

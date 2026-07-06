@@ -442,7 +442,7 @@ Emitted spans include:
 - `goal_cli.tik`
 - `goal_cli.tok`
 - `goal_cli.no_mistakes.prepare`
-- `goal_cli.no_mistakes.gate`
+- `goal_cli.no_mistakes.checkpoint`
 
 ## Prompt Placeholders
 
