@@ -63,18 +63,27 @@ def execute_tok(config: TokConfig, prompt: str, run_dir: Path, timeout_seconds: 
     plan.prompt_path.write_text(prompt, encoding="utf-8")
     plan.provider_prompt_path.write_text(plan.prompt, encoding="utf-8")
 
+    provider_errors: list[str] = []
     if config.provider == "claude_code_goal":
         ok = _run_claude_code_goal(plan, timeout_seconds)
     elif config.provider == "codex_app_server":
         ok = _run_codex_app_server_goal(config, plan, timeout_seconds)
     else:
         ok = run_command_logged(list(plan.command), plan.cwd, plan.log_path, plan.prompt, timeout_seconds=timeout_seconds)
+        if ok:
+            completion_error = _codex_goal_completion_error(plan.log_path)
+            if completion_error is not None:
+                with plan.log_path.open("a", encoding="utf-8") as log_file:
+                    log_file.write(f"\nERROR: {completion_error}\n")
+                provider_errors.append(completion_error)
+                ok = False
     attachment_errors = _attachment_integrity_errors(attachment_snapshot, _snapshot_attachment_files(attachment_dir))
     if attachment_errors:
         (run_dir / "tok_attachment_integrity.log").write_text("\n".join(attachment_errors) + "\n", encoding="utf-8")
         return TokExecutionResult(False, None, None, tuple(attachment_errors), plan)
     if not ok:
-        return TokExecutionResult(False, None, None, ("tok provider failed",), plan)
+        errors = tuple(provider_errors) or ("tok provider failed",)
+        return TokExecutionResult(False, None, None, errors, plan)
 
     report = runtime_tok_report()
     plan.report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -201,7 +210,7 @@ def _run_codex_app_server_goal(config: TokConfig, plan: TokExecutionPlan, timeou
                 "cwd": str(plan.cwd),
                 "approvalPolicy": "never",
                 "sandbox": config.sandbox,
-                "ephemeral": True,
+                "ephemeral": False,
                 "serviceName": "goal-cli",
                 "threadSource": "goal-cli-tok",
             }
@@ -331,6 +340,7 @@ class _JsonRpcStdioClient:
 
     def wait_for_turn_completed(self, thread_id: str, turn_id: str) -> bool:
         while True:
+            fallback_completed: dict[str, Any] | None = None
             for notification in self.notifications:
                 if notification.get("method") != "turn/completed":
                     continue
@@ -338,11 +348,24 @@ class _JsonRpcStdioClient:
                 if not isinstance(params, dict) or params.get("threadId") != thread_id:
                     continue
                 turn = params.get("turn")
-                if not isinstance(turn, dict) or turn.get("id") != turn_id:
+                if not isinstance(turn, dict):
+                    continue
+                if turn.get("id") != turn_id:
+                    if fallback_completed is None:
+                        fallback_completed = turn
                     continue
                 if turn.get("status") == "completed":
                     return True
                 self.log_error(f"turn completed with non-success status: {turn.get('status')}")
+                return False
+            if fallback_completed is not None:
+                if fallback_completed.get("status") == "completed":
+                    self.log_error(
+                        "turn/start response id did not match completed notification; "
+                        f"using completed turn {fallback_completed.get('id')}"
+                    )
+                    return True
+                self.log_error(f"turn completed with non-success status: {fallback_completed.get('status')}")
                 return False
             self._read_next_message()
 
@@ -520,6 +543,20 @@ def _claude_code_goal_prompt(prompt: str) -> str:
 
 def _plain_tok_prompt(prompt: str) -> str:
     return f"{prompt.rstrip()}\n"
+
+
+def _codex_goal_completion_error(log_path: Path) -> str | None:
+    try:
+        log_text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f"tok provider log could not be read: {exc}"
+    if _codex_goal_log_has_completion_marker(log_text):
+        return None
+    return "codex_goal exited without a model completion marker"
+
+
+def _codex_goal_log_has_completion_marker(log_text: str) -> bool:
+    return any(line.strip() == "tokens used" for line in log_text.splitlines())
 
 
 def _snapshot_attachment_files(attachment_dir: Path) -> dict[str, str]:

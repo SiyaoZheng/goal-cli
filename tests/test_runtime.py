@@ -604,6 +604,25 @@ class GoalRuntimeTests(unittest.TestCase):
             self.assertEqual(state["last_tok"]["source_change_possible"], True)
             self.assertEqual(state["last_tok"]["remaining_artifact_bottleneck"], "not reported by tok")
 
+    def test_codex_goal_zero_exit_without_completion_marker_records_tok_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_basic_project(root)
+            self._write_tok_behavior(root, {"mode": "no_completion_marker"})
+
+            config = load_config(root / "goal.toml")
+            result = run_goal(config, RuntimeOptions(max_minutes=0))
+
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.status, "active")
+            state = load_state(config)
+            self.assertEqual(state["status"], "active")
+            self.assertEqual(state["next_action"], "tok")
+            self.assertEqual(state["history"][-1]["event"], "tok_failed_ignored")
+            self.assertTrue(state["history"][-1]["run_dir"].startswith(".goal/runs/heartbeat-0001"))
+            self.assertEqual(state["last_tok_attempt"]["error"], "codex_goal exited without a model completion marker")
+            self.assertNotIn("last_tok", state)
+
     def test_codex_goal_tok_uses_goal_feature_without_structured_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -628,6 +647,11 @@ class GoalRuntimeTests(unittest.TestCase):
                     assert "--output-schema" not in args
                     prompt = sys.stdin.read()
                     assert prompt == "/goal\\nrepair prompt\\n"
+                    print("assistant final")
+                    print("Done.")
+                    print()
+                    print("tokens used")
+                    print("1")
                     """
                 ).strip()
                 + "\n",
@@ -661,6 +685,47 @@ class GoalRuntimeTests(unittest.TestCase):
             self.assertNotIn("tok", provider_prompt.lower())
             self.assertNotIn("bounded", provider_prompt.lower())
             self.assertNotIn("writable scopes", provider_prompt.lower())
+
+    def test_codex_goal_tok_rejects_zero_exit_without_model_completion_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bin_dir = root / "bin"
+            src_dir = root / "src"
+            run_dir = root / ".goal" / "runs" / "heartbeat-0001"
+            bin_dir.mkdir()
+            src_dir.mkdir()
+            run_dir.mkdir(parents=True)
+            fake_codex = bin_dir / "codex"
+            fake_codex.write_text(
+                textwrap.dedent(
+                    """
+                    #!/usr/bin/env python3
+                    import sys
+
+                    sys.stdin.read()
+                    print("OpenAI Codex v0.142.5")
+                    print("user")
+                    print("/goal")
+                    print("2026-07-06T13:22:59Z ERROR rmcp::transport::worker: worker quit with fatal")
+                    """
+                ).strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+            old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = f"{bin_dir}{os.pathsep}{old_path}"
+            try:
+                config = load_config(self._write_codex_goal_project(root))
+                result = execute_tok(config.tok, "repair prompt", run_dir)
+            finally:
+                os.environ["PATH"] = old_path
+
+            self.assertFalse(result.ok)
+            self.assertIn("codex_goal exited without a model completion marker", result.detail)
+            self.assertFalse((run_dir / "tok_report.json").exists())
+            log_text = (run_dir / "tok_codex.log").read_text(encoding="utf-8")
+            self.assertIn("codex_goal exited without a model completion marker", log_text)
 
     def test_claude_code_goal_tok_synthesizes_runtime_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -752,7 +817,7 @@ class GoalRuntimeTests(unittest.TestCase):
                         if method == "initialize":
                             respond(request_id, {"userAgent": "fake-codex-app-server"})
                         elif method == "thread/start":
-                            assert params["ephemeral"] is True
+                            assert params["ephemeral"] is False
                             assert params["approvalPolicy"] == "never"
                             assert params["sandbox"] == "workspace-write"
                             respond(request_id, {"thread": {"id": "thread-1"}})
@@ -773,7 +838,7 @@ class GoalRuntimeTests(unittest.TestCase):
                             assert sandbox_policy["type"] == "workspaceWrite"
                             assert any(path.endswith("attachments") for path in sandbox_policy["writableRoots"])
                             Path(params["cwd"], "source.txt").write_text("ready\\n", encoding="utf-8")
-                            respond(request_id, {"turn": {"id": "turn-1", "status": "inProgress", "items": []}})
+                            respond(request_id, {"turn": {"id": "response-turn", "status": "inProgress", "items": []}})
                             print(json.dumps({
                                 "method": "turn/completed",
                                 "params": {"threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed", "items": []}}
@@ -1547,13 +1612,26 @@ max_blocker_repeats = 3
                 prompt = sys.stdin.read()
                 assert prompt.startswith("/goal\\n")
                 assert "Return the required report" not in prompt
+                def finish():
+                    print("assistant final")
+                    print("Done.")
+                    print()
+                    print("tokens used")
+                    print("1")
                 attachment_dirs = [Path(args[index + 1]) for index, arg in enumerate(args) if arg == "--add-dir" and args[index + 1].endswith("attachments")]
                 run_dir = attachment_dirs[0].parent if attachment_dirs else root / ".goal" / "runs" / "unknown"
                 output_path = run_dir / "tok_report.json"
                 behavior_path = root / "scripts" / "tok_behavior.json"
                 behavior = json.loads(behavior_path.read_text(encoding="utf-8")) if behavior_path.exists() else {"mode": "success"}
+                if behavior["mode"] == "no_completion_marker":
+                    print("OpenAI Codex v0.142.5")
+                    print("user")
+                    print("/goal")
+                    print("2026-07-06T13:22:59Z ERROR rmcp::transport::worker: worker quit with fatal")
+                    raise SystemExit(0)
                 if behavior["mode"] == "invalid":
                     output_path.write_text("not json\\n", encoding="utf-8")
+                    finish()
                     raise SystemExit(0)
                 if behavior["mode"] == "no_source":
                     output_path.write_text(json.dumps({
@@ -1562,12 +1640,15 @@ max_blocker_repeats = 3
                         "expected_artifact_visible_improvement": [],
                         "remaining_artifact_bottleneck": behavior["remaining_artifact_bottleneck"]
                     }) + "\\n", encoding="utf-8")
+                    finish()
                     raise SystemExit(0)
                 if behavior["mode"] == "success_no_change":
+                    finish()
                     raise SystemExit(0)
                 if behavior["mode"] == "metadata_only":
                     (root / ".DS_Store").write_bytes(b"root metadata")
                     (root / "src" / ".DS_Store").write_bytes(b"source metadata")
+                    finish()
                     raise SystemExit(0)
                 if behavior["mode"] == "mutate_artifact":
                     (root / "output" / "artifact.txt").write_text("hand-edited artifact\\n", encoding="utf-8")
@@ -1576,6 +1657,7 @@ max_blocker_repeats = 3
                 if behavior["mode"] == "mutate_unexpected":
                     (root / "scripts" / "tok-side-effect.txt").write_text("unexpected side effect\\n", encoding="utf-8")
                 (root / "src" / "source.txt").write_text("ready\\n", encoding="utf-8")
+                finish()
                 """
             ).strip()
             + "\n",

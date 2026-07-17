@@ -419,7 +419,7 @@ generated_dirs = ["output", "build"]
                             respond(request_id, {{"userAgent": "fake-codex-app-server"}})
                         elif method == "thread/start":
                             assert params["approvalPolicy"] == "never"
-                            assert params["ephemeral"] is True
+                            assert params["ephemeral"] is False
                             respond(request_id, {{"thread": {{"id": "thread-1"}}}})
                         elif method == "thread/goal/set":
                             assert params["threadId"] == "thread-1"
@@ -447,6 +447,11 @@ generated_dirs = ["output", "build"]
                     assert prompt.startswith("/goal\\n")
                     assert "Doctor smoke check for goal-cli setup readiness" in prompt
                     (workspace / "doctor-smoke.txt").write_text("ok\\n", encoding="utf-8")
+                    print("assistant final")
+                    print("Done.")
+                    print()
+                    print("tokens used")
+                    print("1")
                     raise SystemExit(0)
 
                 output_path = Path(args[args.index("--output-last-message") + 1])
