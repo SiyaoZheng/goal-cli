@@ -131,6 +131,37 @@ class CrashSafeTransactionTests(unittest.TestCase):
             self.assertTrue(second_result.conflict)
             self.assertEqual((root / "modify.txt").read_text(encoding="utf-8"), "first\n")
 
+    def test_journal_cannot_be_recovered_against_a_different_repository_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_a = Path(temp_dir) / "repo-a"
+            repo_b = Path(temp_dir) / "repo-b"
+            isolated = Path(temp_dir) / "isolated"
+            self._write_baseline(repo_a)
+            self._write_baseline(repo_b)
+            self._write_after(isolated)
+            before = snapshot_tree(repo_a, excluded=(".git", ".goal"))
+            mutations = detect_mutations(before, snapshot_tree(isolated))
+            self.assertEqual(
+                {mutation.operation for mutation in mutations},
+                {"create", "modify", "delete", "rename"},
+            )
+            journal_path = prepare_transaction(
+                repo_a,
+                repo_a / ".goal",
+                "attempt-cross-root",
+                mutations,
+                isolated,
+            )
+            repo_b_before = snapshot_tree(repo_b, excluded=(".git", ".goal"))
+
+            result = commit_transaction(repo_b, journal_path)
+
+            self.assertFalse(result.committed)
+            self.assertTrue(result.conflict)
+            self.assertIn("repository root mismatch", result.detail)
+            self.assertEqual(snapshot_tree(repo_b, excluded=(".git", ".goal")), repo_b_before)
+            self.assertEqual(load_transaction(journal_path)["status"], "PREPARED")
+
     def test_prepared_journal_is_self_contained_after_isolated_workspace_is_removed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "repo"

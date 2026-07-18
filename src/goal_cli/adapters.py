@@ -61,6 +61,7 @@ class ProductionGoalProviderAdapters:
                 run_dir / "producer.log",
                 timeout_seconds=timeout_seconds,
                 containment_root=containment_root,
+                containment_allow_network=config.lease.allow_network if config.lease is not None else False,
             )
         )
 
@@ -76,6 +77,7 @@ class ProductionGoalProviderAdapters:
                 config.artifact.copy_as,
                 timeout_seconds=timeout_seconds,
                 containment_root=config.root if config.perpetual.enabled and config.tik.provider in COMMAND_TIK_PROVIDERS else None,
+                containment_allow_network=config.lease.allow_network if config.lease is not None else False,
             )
         )
 
@@ -93,6 +95,7 @@ def run_shell_logged(
     stdin: str | None = None,
     timeout_seconds: float | None = None,
     containment_root: Path | None = None,
+    containment_allow_network: bool = False,
 ) -> bool:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     run_env = os.environ.copy()
@@ -103,7 +106,15 @@ def run_shell_logged(
         log_file.flush()
         if _timeout_exhausted(timeout_seconds, log_file):
             return False
-        contained_command = build_contained_shell_command(command_text, containment_root) if containment_root is not None else None
+        contained_command = (
+            build_contained_shell_command(
+                command_text,
+                containment_root,
+                allow_network=containment_allow_network,
+            )
+            if containment_root is not None
+            else None
+        )
         if containment_root is not None and contained_command is None:
             log_file.write("ERROR: no supported mutation containment backend is available.\n")
             return False
@@ -159,6 +170,7 @@ def run_tik(
     artifact_copy_as: str | None,
     timeout_seconds: float | None = None,
     containment_root: Path | None = None,
+    containment_allow_network: bool = False,
 ) -> Path | None:
     output_path = run_dir / f"{label}_memo.md"
     (run_dir / f"{label}_prompt.md").write_text(prompt, encoding="utf-8")
@@ -175,6 +187,7 @@ def run_tik(
             env=env,
             timeout_seconds=timeout_seconds,
             containment_root=containment_root,
+            containment_allow_network=containment_allow_network,
         )
         if not ok:
             (run_dir / f"{label}_FAILED.txt").write_text("tik command failed\n", encoding="utf-8")
@@ -227,21 +240,45 @@ def build_contained_shell_command(
     containment_root: Path,
     *,
     backend: str | None = None,
+    allow_network: bool = False,
+) -> list[str] | None:
+    return build_contained_command(
+        ["/bin/bash", "-lc", command_text],
+        containment_root,
+        backend=backend,
+        allow_network=allow_network,
+    )
+
+
+def build_contained_command(
+    command: list[str],
+    containment_root: Path,
+    *,
+    backend: str | None = None,
+    allow_network: bool = False,
 ) -> list[str] | None:
     backend = backend or mutation_containment_backend()
     root = str(containment_root.resolve(strict=False))
     if backend == "sandbox-exec":
         escaped_root = root.replace("\\", "\\\\").replace('"', '\\"')
-        profile = (
-            "(version 1)\n"
-            "(allow default)\n"
-            f'(deny file-write* (require-not (subpath "{escaped_root}")))\n'
-        )
-        return ["/usr/bin/sandbox-exec", "-p", profile, "/bin/bash", "-lc", command_text]
+        profile_lines = [
+            "(version 1)",
+            "(allow default)",
+            f'(deny file-write* (require-not (subpath "{escaped_root}")))',
+        ]
+        if not allow_network:
+            profile_lines.append("(deny network*)")
+        profile = "\n".join(profile_lines) + "\n"
+        return ["/usr/bin/sandbox-exec", "-p", profile, *command]
     if backend == "bwrap":
-        return [
+        plan = [
             "bwrap",
             "--die-with-parent",
+        ]
+        if not allow_network:
+            plan.append("--unshare-net")
+        plan.extend(
+            [
             "--ro-bind",
             "/",
             "/",
@@ -252,10 +289,10 @@ def build_contained_shell_command(
             "/tmp",
             "--chdir",
             root,
-            "/bin/bash",
-            "-lc",
-            command_text,
-        ]
+            *command,
+            ]
+        )
+        return plan
     return None
 
 
@@ -354,6 +391,8 @@ def run_claude_print_logged(
     log_path: Path,
     stdin: str,
     timeout_seconds: float | None = None,
+    containment_root: Path | None = None,
+    containment_allow_network: bool = False,
 ) -> str | None:
     """Run a claude --print command, keeping stdout apart from the log so the
     JSON envelope stays parseable. Returns stdout on success, None on failure."""
@@ -363,9 +402,21 @@ def run_claude_print_logged(
         log_file.flush()
         if _timeout_exhausted(timeout_seconds, log_file):
             return None
+        contained_command = (
+            build_contained_command(
+                command,
+                containment_root,
+                allow_network=containment_allow_network,
+            )
+            if containment_root is not None
+            else command
+        )
+        if contained_command is None:
+            log_file.write("ERROR: no supported mutation containment backend is available.\n")
+            return None
         try:
             process = subprocess.Popen(
-                command,
+                contained_command,
                 cwd=cwd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,

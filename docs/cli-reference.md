@@ -10,7 +10,7 @@ subcommand.
 
 ```text
 usage: goal-cli [-h] [-c CONFIG]
-                {init,validate,doctor,run,tik,heartbeat,state,reset,cleanup,render-prompts} ...
+                {init,validate,doctor,run,stop,resume,tik,heartbeat,state,reset,cleanup,render-prompts} ...
 
 Configure and run artifact-centered heartbeats for coding agents.
 
@@ -19,12 +19,14 @@ options:
   -c, --config CONFIG   Path to goal.toml (default: goal.toml)
 
 commands:
-  {init,validate,doctor,run,tik,heartbeat,state,reset,cleanup,render-prompts}
+  {init,validate,doctor,run,stop,resume,tik,heartbeat,state,reset,cleanup,render-prompts}
     init                Create a starter artifact goal.toml
     validate            Validate goal.toml, prompt placeholders, and writable
                         scopes
     doctor              Check setup readiness before a heartbeat
     run                 Run one autonomous heartbeat
+    stop                Persistently stop a perpetual goal without completing it
+    resume              Resume a stopped perpetual goal from durable state
     tik                 Rebuild the artifact and run tik review, but skip tok
     heartbeat           Install or run the system-level heartbeat
     state               Print state JSON or the default initial state
@@ -107,10 +109,31 @@ options:
   -h, --help  show this help message and exit
 ```
 
+## Perpetual Stop and Resume
+
+```text
+usage: goal-cli stop [-h]
+
+Persistently stop a perpetual goal without completing it.
+```
+
+```text
+usage: goal-cli resume [-h]
+
+Resume a stopped perpetual goal from durable state.
+```
+
+`stop` writes the `stopped` lifecycle state and prevents later scheduler ticks
+from running producer, tik, or tok. `resume` preserves the immutable goal,
+lease, attempt history, and transaction evidence, then makes the next
+heartbeat due. Neither command is available as a substitute for configuring
+`[perpetual] enabled = true`.
+
 ## System-Level Heartbeat
 
-The system-level heartbeat installs an OS timer. Each tick still runs exactly
-one `goal-cli` heartbeat; it does not add multi-cycle behavior inside the CLI.
+The system-level heartbeat installs an OS timer. Each tick runs at most one
+bounded `goal-cli` heartbeat. Perpetual scheduling is durable state shared
+across ticks.
 
 ```text
 usage: goal-cli heartbeat [-h] {install,status,uninstall,paths,tick} ...
@@ -144,7 +167,8 @@ options:
                         OS service manager to use
   --label LABEL         Override the generated service label
   --every-minutes EVERY_MINUTES
-                        Timer interval in minutes; must be positive
+                        Timer interval in minutes; defaults to 5 for perpetual
+                        goals and 30 otherwise
   --max-minutes MAX_MINUTES
                         Maximum wall-clock minutes for each heartbeat tick
   --no-start            Write service files but do not load or start the timer
@@ -175,6 +199,9 @@ uses the project root as its working directory, and writes service logs under
 then calls the same one-heartbeat runtime as `goal-cli run`. If another
 heartbeat is currently active, the tick exits successfully after logging a
 skipped tick so the OS scheduler does not mark normal overlap as a failure.
+For perpetual goals, a not-yet-due tick also exits before producer or provider
+work. The default five-minute wake-up lets the 5-minute provider backoff run on
+time; healthy and active cadence still comes from `next_due_at`.
 
 ## Cleanup
 

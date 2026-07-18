@@ -81,6 +81,26 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("cycle", help_text)
         self.assertIn("Omitting the command defaults to run", help_text)
         self.assertIn("Validate goal.toml, prompt placeholders, and writable", help_text)
+        self.assertIn("stop", help_text)
+        self.assertIn("resume", help_text)
+
+    def test_stop_and_resume_delegate_to_durable_perpetual_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = self._write_project(Path(temp_dir))
+            output = io.StringIO()
+
+            with (
+                mock.patch("goal_cli.cli.stop_perpetual", return_value=RunResult(0, "stopped", None, "stopped")) as stop,
+                mock.patch("goal_cli.cli.resume_perpetual", return_value=RunResult(0, "active", None, "resumed")) as resume,
+                contextlib.redirect_stdout(output),
+            ):
+                self.assertEqual(main(["-c", str(config_path), "stop"]), 0)
+                self.assertEqual(main(["-c", str(config_path), "resume"]), 0)
+
+            stop.assert_called_once()
+            resume.assert_called_once()
+            self.assertIn("stopped", output.getvalue())
+            self.assertIn("resumed", output.getvalue())
 
     def test_doctor_help_exposes_separate_smoke_timeout(self) -> None:
         output = io.StringIO()

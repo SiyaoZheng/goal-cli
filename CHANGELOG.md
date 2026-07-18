@@ -9,6 +9,16 @@ while the public interface remains unstable.
 
 ### Added
 
+- Explicit perpetual lifecycle with healthy scheduling, bounded provider
+  backoff, durable operator stop/resume, and substantive attempt reframing.
+- Exact capability leases for create, modify, delete, and rename operations,
+  including deny overrides, path hardening, and fail-closed provider preflight.
+- Isolated producer, command-tik, and ToK execution with all-or-nothing
+  authorization against dirty and untracked baselines.
+- Crash-safe multi-file transactions with durable staging, repository-scoped
+  serialization, drift detection, and idempotent recovery.
+- One shared typed ToK provider contract for Codex exec, Codex app-server, and
+  Claude Code.
 - Runtime tok mutation audit that records direct artifact mutation.
 - Runtime tok mutation audit that records changes outside declared source,
   runtime, and goal state scopes.

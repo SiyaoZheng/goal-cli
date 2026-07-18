@@ -495,12 +495,96 @@ provider evidence under `.goal/runs/`.
 | Status | Meaning |
 | --- | --- |
 | `active` | The goal can continue on a later heartbeat. |
+| `healthy` | The rebuilt artifact currently passes tik and waits for its next inspection. |
+| `blocked` | The last bounded attempt could not proceed safely; perpetual mode will retry or reframe. |
+| `stopped` | An operator explicitly stopped the perpetual goal; `resume` makes it due again. |
 | `complete` | The rebuilt artifact passed tik. |
 | `blocked_invalid_review_evidence` | Producer/tik evidence is missing, failed, unparseable, or stale, so tok cannot safely act on it. |
+
+`healthy`, `blocked`, and `stopped` are perpetual-only states. In perpetual
+mode an old `complete` checkpoint is migrated idempotently to `healthy`;
+non-perpetual goals keep the existing terminal `complete` behavior.
 
 Non-gating observations such as repeated blockers, no source changes, provider
 failures, and no-mistakes failures remain in history, provenance files, and
 `last_*` state fields while the status stays `active`.
+
+## Perpetual Mode and Capability Leases
+
+Perpetual execution is explicit opt-in. It keeps one substantive goal alive as
+bounded heartbeats; it does not invent work after the artifact becomes healthy.
+
+```toml
+[perpetual]
+enabled = true
+substantive_goal = "Make the paper's measurement argument withstand the fixed reviewer objections."
+healthy_interval_seconds = 21600
+active_interval_seconds = 1800
+provider_backoff_seconds = [300, 1800, 7200]
+reframe_angles = [
+  "repair the evidence chain",
+  "revisit measurement or analysis",
+  "improve reader-facing exposition",
+]
+
+[lease]
+version = "paper-lease-v1"
+allow_shell = true
+allow_network = false
+tools = ["Rscript"]
+
+[[lease.rules]]
+effect = "allow"
+operations = ["create", "modify", "delete", "rename"]
+paths = ["manuscript/**", "analysis/**"]
+
+[[lease.rules]]
+effect = "allow"
+operations = ["create", "modify"]
+paths = ["output/paper.pdf"]
+
+[[lease.rules]]
+effect = "deny"
+operations = ["create", "modify", "delete", "rename"]
+paths = [".github/**", "**/*checklist*", "**/*audit*"]
+```
+
+- `substantive_goal` defaults to the top-level goal `name`. Its exact text and
+  the lease `version` are bound on the first perpetual run and cannot change
+  during that run.
+- `healthy_interval_seconds` defaults to 6 hours.
+- `active_interval_seconds` defaults to 30 minutes for active and blocked work.
+- `provider_backoff_seconds` defaults to 5 minutes, 30 minutes, and 2 hours,
+  capped at the final value. A successful provider call resets the sequence.
+- `reframe_angles` is a bounded list of substantive approaches. Provider
+  failures retain the pending angle; a substantive blocked or zero-delta
+  attempt consumes it and selects a different recent angle next time.
+- `allow_shell`, `allow_network`, and `tools` are checked before a ToK provider
+  starts. A missing tool or capability that cannot be contained fails closed.
+- Lease rules use safe repository-relative paths or globs. Deny rules override
+  allow rules. A rename requires both its source and destination to be
+  authorized. If any mutation in a batch is unauthorized, none are applied.
+
+Producer and command-backed tik also run from isolated copies in perpetual
+mode. Authorized producer output passes through the same drift check, durable
+journal, and repository lock as model edits. Command-tik file effects are
+discarded. Existing dirty and untracked files are included in the isolated
+baseline and are not overwritten when canonical content has drifted.
+
+Operational evidence remains in the ordinary runtime state rather than a new
+governance artifact:
+
+- `goal_binding`: immutable substantive goal identity and lease version;
+- `next_due_at` and `call_state`: scheduling and the last bounded call result;
+- `attempt_supervisor`: bounded recent attempt evidence plus deterministic
+  aggregate outcome and angle counts;
+- `last_transaction`: stable attempt ID, mutation identities, and journal path;
+- state `history`: recovery, stop/resume, and lifecycle events.
+
+Use `goal-cli stop` to persistently stop without marking the goal complete.
+`goal-cli resume` clears that operator stop and makes the next heartbeat due.
+On restart, transaction recovery and state reconciliation run before any new
+producer or provider inspection.
 
 ## Setup Readiness
 
@@ -598,15 +682,16 @@ goal-cli cleanup --kill-orphans
 Install an OS-level timed heartbeat:
 
 ```bash
-goal-cli heartbeat install --every-minutes 30 --max-minutes 600
+goal-cli heartbeat install --max-minutes 600
 goal-cli heartbeat status
 ```
 
-The system-level timer does not change the config schema and does not create a
-multi-cycle runtime mode. It writes per-user scheduler files for the current
-project and each OS tick invokes one hardened `heartbeat tick`, which cleans
-stale runtime state and then executes the same one-heartbeat runtime as
-`goal-cli run`.
+The default service wake-up is 5 minutes for perpetual goals so the shortest
+provider backoff can be honored, and remains 30 minutes for legacy goals.
+Every tick first checks `next_due_at`; work that is not due exits without
+producer, tik, or tok calls. Each due tick invokes one bounded `heartbeat tick`,
+which cleans stale runtime state and then executes the same one-heartbeat
+runtime as `goal-cli run`.
 
 ## Runtime Units
 
@@ -615,4 +700,5 @@ stale runtime state and then executes the same one-heartbeat runtime as
 - `heartbeat tick`: one scheduler-safe invocation that cleans stale runtime
   state, runs one heartbeat, and exits successfully if another heartbeat is
   already active.
-- `heartbeat install`: OS scheduler setup for repeated one-heartbeat ticks.
+- `heartbeat install`: OS scheduler setup for repeated bounded ticks; scheduling
+  inside perpetual state decides whether a wake-up performs work.

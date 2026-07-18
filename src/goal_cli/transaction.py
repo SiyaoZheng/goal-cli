@@ -109,8 +109,15 @@ def commit_transaction(
 ) -> TransactionResult:
     canonical_root = canonical_root.resolve(strict=False)
     journal_path = journal_path.resolve(strict=False)
+    journal = load_transaction(journal_path)
+    root_conflict = _journal_root_conflict(canonical_root, journal)
+    if root_conflict is not None:
+        return TransactionResult(False, True, root_conflict, journal_path)
     with _repository_lock(canonical_root):
         journal = load_transaction(journal_path)
+        root_conflict = _journal_root_conflict(canonical_root, journal)
+        if root_conflict is not None:
+            return TransactionResult(False, True, root_conflict, journal_path)
         status = journal.get("status")
         if status in {"COMMITTED", "CHECKPOINTED"}:
             return TransactionResult(True, False, f"transaction is {status.lower()}", journal_path)
@@ -174,7 +181,17 @@ def recover_transactions(canonical_root: Path, state_dir: Path) -> tuple[Transac
     results: list[TransactionResult] = []
     for journal_path in sorted(transactions_dir.glob("*/journal.json")):
         journal = load_transaction(journal_path)
-        if journal.get("status") in {"CHECKPOINTED", "CONFLICT"}:
+        if journal.get("status") == "CHECKPOINTED":
+            continue
+        if journal.get("status") == "CONFLICT":
+            results.append(
+                TransactionResult(
+                    False,
+                    True,
+                    str(journal.get("conflict") or "transaction conflict"),
+                    journal_path,
+                )
+            )
             continue
         results.append(commit_transaction(canonical_root, journal_path))
     return tuple(results)
@@ -247,6 +264,19 @@ def _journal_steps(journal: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(steps, list) or not all(isinstance(step, dict) for step in steps):
         raise ValueError("transaction journal steps are invalid")
     return steps
+
+
+def _journal_root_conflict(canonical_root: Path, journal: dict[str, Any]) -> str | None:
+    recorded_root = journal.get("canonical_root")
+    if not isinstance(recorded_root, str) or not recorded_root.strip():
+        return "transaction journal does not record a canonical repository root"
+    normalized_recorded_root = Path(recorded_root).expanduser().resolve(strict=False)
+    if normalized_recorded_root != canonical_root:
+        return (
+            "transaction repository root mismatch: "
+            f"journal records {normalized_recorded_root}, recovery requested {canonical_root}"
+        )
+    return None
 
 
 def _preflight_conflict(canonical_root: Path, steps: list[dict[str, Any]]) -> str | None:

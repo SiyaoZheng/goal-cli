@@ -269,7 +269,7 @@ do not run inside a Git repository.
 For unattended progress, install a per-user OS timer:
 
 ```bash
-goal-cli heartbeat install --every-minutes 30 --max-minutes 600
+goal-cli heartbeat install --max-minutes 600
 ```
 
 On macOS this writes a LaunchAgent under `~/Library/LaunchAgents/`. On Linux it
@@ -278,7 +278,14 @@ writes a systemd user service and timer under
 absolute `goal.toml` path, starts in the project root, and writes scheduler logs
 under `.goal/system-heartbeat/`.
 
-The timer does not create a multi-cycle CLI mode. Each OS tick invokes:
+For a legacy goal, the default wake-up remains every 30 minutes. When
+`[perpetual] enabled = true`, the default is every 5 minutes so the shortest
+provider backoff can run on time. The persisted `next_due_at` still controls
+whether a wake-up does work: healthy goals default to 6 hours, active or
+blocked goals to 30 minutes, and provider failures to 5 minutes, 30 minutes,
+then 2 hours capped.
+
+Each OS tick invokes:
 
 ```bash
 goal-cli -c /absolute/path/to/goal.toml heartbeat tick --max-minutes 600
@@ -286,7 +293,8 @@ goal-cli -c /absolute/path/to/goal.toml heartbeat tick --max-minutes 600
 
 `heartbeat tick` cleans stale interrupted runtime state, runs one heartbeat, and
 exits successfully when it finds an already-active heartbeat lock. That keeps
-normal timer overlap from becoming a system-service failure.
+normal timer overlap from becoming a system-service failure. A perpetual tick
+that is not due exits before producer, tik, or tok calls.
 
 Useful management commands:
 
@@ -295,6 +303,42 @@ goal-cli heartbeat paths
 goal-cli heartbeat status
 goal-cli heartbeat uninstall
 ```
+
+To opt into perpetual mode, add a fixed substantive goal and an explicit
+capability lease to `goal.toml`. Keep the lease limited to manuscript sources,
+necessary analysis, and direct generated artifacts:
+
+```toml
+[perpetual]
+enabled = true
+substantive_goal = "Resolve the fixed substantive objections in the paper."
+
+[lease]
+version = "paper-v1"
+allow_shell = true
+allow_network = false
+tools = ["Rscript"]
+
+[[lease.rules]]
+effect = "allow"
+operations = ["create", "modify", "delete", "rename"]
+paths = ["manuscript/**", "analysis/**"]
+
+[[lease.rules]]
+effect = "allow"
+operations = ["create", "modify"]
+paths = ["output/paper.pdf"]
+```
+
+The first run binds the exact goal and lease version. Attempts execute against
+isolated copies; authorized deltas are journaled and committed under a
+repository lock. On restart, journal recovery happens before new inspection.
+Inspect `goal-cli state` for `goal_binding`, `next_due_at`,
+`attempt_supervisor`, `last_transaction`, and recovery history.
+
+Use `goal-cli stop` for a durable operator stop that does not mark the task
+complete. `goal-cli resume` preserves the same goal, lease, and attempt history
+and makes work due again.
 
 ## Observability Defaults
 

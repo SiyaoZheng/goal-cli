@@ -265,6 +265,42 @@ their own tik provider in ledgers and state.
 The important boundary is simple: the fixing agent edits source, but the final
 result has to be rebuilt and checked before the work counts as done.
 
+### Perpetual Goals
+
+Perpetual mode is explicit opt-in. It keeps one fixed substantive goal alive
+through bounded heartbeats, sleeps when the artifact is healthy, and applies
+model or producer changes only through an exact file-operation lease:
+
+```toml
+[perpetual]
+enabled = true
+substantive_goal = "Resolve the fixed substantive objections in the paper."
+
+[lease]
+version = "paper-v1"
+allow_shell = true
+allow_network = false
+
+[[lease.rules]]
+effect = "allow"
+operations = ["create", "modify", "delete", "rename"]
+paths = ["manuscript/**", "analysis/**"]
+
+[[lease.rules]]
+effect = "allow"
+operations = ["create", "modify"]
+paths = ["output/paper.pdf"]
+```
+
+Healthy inspection defaults to 6 hours, active or blocked work to 30 minutes,
+and provider failures to 5 minutes, 30 minutes, then 2 hours capped. The OS
+timer wakes every 5 minutes by default for perpetual goals, but `next_due_at`
+short-circuits work that is not due. `goal-cli state` shows the immutable goal
+binding, bounded attempt evidence, and transaction recovery journal. Use
+`goal-cli stop` and `goal-cli resume` for durable operator control without
+terminal completion. See the
+[full perpetual and lease schema](docs/config-schema.md#perpetual-mode-and-capability-leases).
+
 ### Installing From This Checkout
 
 If you are working inside the `goal-cli` repository itself:
@@ -292,8 +328,9 @@ python3 -m pip install -e .
 | `goal-cli doctor` | Check whether the local setup is ready to run. |
 | `goal-cli run --dry-run` | Render the prompts and run folder without calling repair agents. |
 | `goal-cli run --max-minutes 600` | Run one bounded work pass. |
-| `goal-cli heartbeat install --every-minutes 30 --max-minutes 600` | Install a per-user OS timer that triggers one heartbeat per tick. |
+| `goal-cli heartbeat install --max-minutes 600` | Install a per-user OS timer; perpetual goals default to a five-minute wake-up. |
 | `goal-cli heartbeat status` | Show the OS timer status and managed paths. |
+| `goal-cli stop` / `goal-cli resume` | Persistently stop or resume a perpetual goal without completing it. |
 | `goal-cli tik` | Rebuild and review the output without running a repair pass. |
 | `goal-cli state` | Show the current saved state. |
 | `goal-cli cleanup` | Clear stale locks after an interrupted run. |

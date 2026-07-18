@@ -6,7 +6,19 @@ import sys
 from pathlib import Path
 
 from .config import ConfigError, dump_config_summary, load_config, validate_config
-from .runtime import DEFAULT_MAX_MINUTES, RuntimeOptions, cleanup_runtime, heartbeat_run_dir, load_state, render_prompts_to_run_dir, reset_state, run_heartbeat, run_goal
+from .runtime import (
+    DEFAULT_MAX_MINUTES,
+    RuntimeOptions,
+    cleanup_runtime,
+    heartbeat_run_dir,
+    load_state,
+    render_prompts_to_run_dir,
+    reset_state,
+    resume_perpetual,
+    run_goal,
+    run_heartbeat,
+    stop_perpetual,
+)
 from .setup_check import DoctorOptions, doctor_exit_code, format_doctor_checks, run_doctor
 from .system_heartbeat import (
     MANAGER_AUTO,
@@ -123,6 +135,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     run_parser.add_argument("--dry-run", action="store_true", help="Create a run directory and render prompts without running producer, tik, or tok")
     run_parser.add_argument("--max-minutes", type=float, default=DEFAULT_MAX_MINUTES, help="Maximum wall-clock minutes for the heartbeat, including providers and no-mistakes")
+    subparsers.add_parser("stop", help="Persistently stop a perpetual goal without completing it")
+    subparsers.add_parser("resume", help="Resume a stopped perpetual goal from durable state")
     subparsers.add_parser(
         "tik",
         help="Rebuild the artifact and run tik review, but skip tok",
@@ -140,7 +154,15 @@ def main(argv: list[str] | None = None) -> int:
         description="Install a launchd LaunchAgent on macOS or a systemd user timer on Linux.",
     )
     _add_system_heartbeat_identity_args(heartbeat_install)
-    heartbeat_install.add_argument("--every-minutes", type=float, default=DEFAULT_EVERY_MINUTES, help="Timer interval in minutes; must be positive")
+    heartbeat_install.add_argument(
+        "--every-minutes",
+        type=float,
+        default=None,
+        help=(
+            "Timer interval in minutes; defaults to 5 for perpetual goals "
+            f"and {DEFAULT_EVERY_MINUTES:g} otherwise"
+        ),
+    )
     heartbeat_install.add_argument("--max-minutes", type=float, default=DEFAULT_MAX_MINUTES, help="Maximum wall-clock minutes for each heartbeat tick")
     heartbeat_install.add_argument("--no-start", action="store_true", help="Write service files but do not load or start the timer")
     heartbeat_install.add_argument("--force", action="store_true", help="Overwrite an existing goal-cli-managed service file")
@@ -225,6 +247,14 @@ def main(argv: list[str] | None = None) -> int:
         return tik_result.exit_code
     if command == "heartbeat":
         return heartbeat_command(config, args)
+    if command == "stop":
+        result = stop_perpetual(config)
+        print(result.message)
+        return result.exit_code
+    if command == "resume":
+        result = resume_perpetual(config)
+        print(result.message)
+        return result.exit_code
     if command == "run":
         run_result = run_goal(
             config,

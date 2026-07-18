@@ -62,16 +62,27 @@ class IsolatedWorkspace:
         if self._finalized:
             raise IsolationError(f"isolated attempt already finalized: {self.attempt_id}")
         self._finalized = True
-        after = snapshot_tree(self.root)
+        after = snapshot_tree(self.root, excluded=self._excluded)
         try:
             mutations = detect_mutations(self.baseline, after)
         except DeltaError as exc:
             raise IsolationError(str(exc)) from exc
         decision = authorize_mutations(lease, mutations, root=self.canonical_root)
-        if not decision.authorized:
+        unsupported_symlinks = tuple(
+            LeaseViolation(
+                mutation.path,
+                mutation.operation,
+                "symlink payload mutations are not supported",
+            )
+            for mutation in mutations
+            if mutation.after_identity is not None
+            and mutation.after_identity.startswith("symlink:")
+        )
+        violations = (*decision.violations, *unsupported_symlinks)
+        if violations:
             detail = "; ".join(
                 f"{violation.operation}:{violation.path}: {violation.reason}"
-                for violation in decision.violations
+                for violation in violations
             )
             return IsolatedAttemptResult(
                 self.attempt_id,
@@ -80,7 +91,7 @@ class IsolatedWorkspace:
                 False,
                 detail,
                 mutations,
-                decision.violations,
+                violations,
             )
         if not mutations:
             return IsolatedAttemptResult(
@@ -148,6 +159,9 @@ def rebase_goal_config(config: GoalConfig, isolated_root: Path) -> GoalConfig:
         write_dirs=tuple(rebase(path) for path in config.tok.write_dirs),
         run_cwd=rebase(config.tok.run_cwd) if config.tok.run_cwd is not None else None,
         runtime_write_dirs=tuple(rebase(path) for path in config.tok.runtime_write_dirs),
+        containment_root=isolated_root,
+        attachments_dir=None,
+        network_access=config.lease.allow_network if config.lease is not None else False,
     )
     return replace(
         config,

@@ -210,6 +210,30 @@ command = "python3 scripts/checklist_review.py"
 `tik.provider = "checklist"` 用来跑基于项目脚本的 checklist 验收，并在
 `tik.md` 和 state 里保留独立 provider 身份。
 
+永续模式需要显式启用，并用 capability lease 固定允许的文件操作边界：
+
+```toml
+[perpetual]
+enabled = true
+substantive_goal = "解决论文中固定的一组实质性问题。"
+
+[lease]
+version = "paper-v1"
+allow_shell = true
+allow_network = false
+
+[[lease.rules]]
+effect = "allow"
+operations = ["create", "modify", "delete", "rename"]
+paths = ["manuscript/**", "analysis/**"]
+```
+
+默认节奏是：健康状态 6 小时复查一次，活跃或受阻状态 30 分钟一次，
+provider 故障按 5 分钟、30 分钟、2 小时封顶退避。永续目标的系统服务
+默认每 5 分钟唤醒一次，但未到 `next_due_at` 时不会调用 producer、Tik
+或 ToK。`goal-cli stop` 和 `goal-cli resume` 可以持久停止或恢复，而不把
+目标误记成完成。
+
 常用命令：
 
 | 命令 | 用途 |
@@ -219,7 +243,8 @@ command = "python3 scripts/checklist_review.py"
 | `goal-cli doctor` | 检查本机能不能跑。 |
 | `goal-cli run --dry-run` | 预演一遍，不让 agent 真改。 |
 | `goal-cli run --max-minutes 600` | 跑一轮预算上限为 600 分钟的心跳。 |
-| `goal-cli heartbeat install --every-minutes 30 --max-minutes 600` | 安装系统级定时心跳；每 30 分钟触发一次 tick，每次 tick 仍然只跑一轮。 |
+| `goal-cli heartbeat install --max-minutes 600` | 安装系统级定时心跳；永续目标默认每 5 分钟唤醒一次。 |
+| `goal-cli stop` / `goal-cli resume` | 持久停止或恢复永续目标，不产生终止完成状态。 |
 
 完整配置说明见 [docs/config-schema.md](docs/config-schema.md)。
 

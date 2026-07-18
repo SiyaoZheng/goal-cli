@@ -119,6 +119,21 @@ class IsolatedWorkspaceTests(unittest.TestCase):
                 with IsolatedWorkspace(root, root / ".goal", "attempt-symlink"):
                     pass
 
+    def test_isolated_workspace_rejects_new_symlink_payload_before_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "repo"
+            self._write_repo(root)
+            lease = self._lease(FileOperation.CREATE, "src/escape")
+
+            with IsolatedWorkspace(root, root / ".goal", "attempt-new-symlink") as workspace:
+                os.symlink("../../../outside", workspace.root / "src" / "escape")
+                result = workspace.finalize(lease)
+
+            self.assertFalse(result.authorized)
+            self.assertFalse(result.committed)
+            self.assertIn("symlink payload", result.detail)
+            self.assertFalse((root / "src" / "escape").exists())
+
     def test_zero_delta_is_authorized_without_creating_transaction(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "repo"

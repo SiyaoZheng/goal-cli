@@ -14,6 +14,7 @@ from typing import Any
 
 from .adapters import CLAUDE_CODE_DISALLOWED_TOOLS, claude_print_envelope, run_claude_print_logged, run_command_logged
 from .config import TokConfig
+from .supervisor import AttemptOutcomeKind
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,7 @@ class TokExecutionResult:
     report: dict[str, Any] | None
     errors: tuple[str, ...]
     plan: TokExecutionPlan | None = None
+    outcome_kind: AttemptOutcomeKind | None = None
 
     @property
     def detail(self) -> str:
@@ -49,9 +51,9 @@ def execute_tok(config: TokConfig, prompt: str, run_dir: Path, timeout_seconds: 
     if not config.write_dirs:
         failed_path = run_dir / "tok_FAILED.txt"
         failed_path.write_text("tok.write_dirs is empty\n", encoding="utf-8")
-        return TokExecutionResult(False, None, None, ("tok.write_dirs is empty",))
+        return TokExecutionResult(False, None, None, ("tok.write_dirs is empty",), outcome_kind=AttemptOutcomeKind.PROTOCOL_INVALID)
 
-    attachment_dir = run_dir / "attachments"
+    attachment_dir = _attachments_dir(config, run_dir)
     attachment_dir.mkdir(parents=True, exist_ok=True)
     attachment_snapshot = _snapshot_attachment_files(attachment_dir)
     if config.provider == "claude_code_goal":
@@ -65,7 +67,7 @@ def execute_tok(config: TokConfig, prompt: str, run_dir: Path, timeout_seconds: 
 
     provider_errors: list[str] = []
     if config.provider == "claude_code_goal":
-        ok = _run_claude_code_goal(plan, timeout_seconds)
+        ok = _run_claude_code_goal(config, plan, timeout_seconds)
     elif config.provider == "codex_app_server":
         ok = _run_codex_app_server_goal(config, plan, timeout_seconds)
     else:
@@ -80,15 +82,16 @@ def execute_tok(config: TokConfig, prompt: str, run_dir: Path, timeout_seconds: 
     attachment_errors = _attachment_integrity_errors(attachment_snapshot, _snapshot_attachment_files(attachment_dir))
     if attachment_errors:
         (run_dir / "tok_attachment_integrity.log").write_text("\n".join(attachment_errors) + "\n", encoding="utf-8")
-        return TokExecutionResult(False, None, None, tuple(attachment_errors), plan)
+        return TokExecutionResult(False, None, None, tuple(attachment_errors), plan, AttemptOutcomeKind.LEASE_VIOLATION)
     if not ok:
         errors = tuple(provider_errors) or ("tok provider failed",)
-        return TokExecutionResult(False, None, None, errors, plan)
+        kind = AttemptOutcomeKind.PROTOCOL_INVALID if provider_errors else _provider_failure_kind(plan.log_path)
+        return TokExecutionResult(False, None, None, errors, plan, kind)
 
     report = runtime_tok_report()
     plan.report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     plan.audit_log_path.write_text("tok completed; runtime synthesized audit report\n", encoding="utf-8")
-    return TokExecutionResult(True, plan.report_path, report, (), plan)
+    return TokExecutionResult(True, plan.report_path, report, (), plan, AttemptOutcomeKind.APPLIED)
 
 
 def build_codex_goal_tok_plan(config: TokConfig, prompt: str, run_dir: Path) -> TokExecutionPlan:
@@ -113,7 +116,7 @@ def build_codex_goal_tok_plan(config: TokConfig, prompt: str, run_dir: Path) -> 
         command.extend(["-m", config.model])
     for write_dir in _dedupe_paths((*config.write_dirs, *config.runtime_write_dirs), skip=(run_cwd,)):
         command.extend(["--add-dir", str(write_dir)])
-    command.extend(["--add-dir", str(run_dir / "attachments")])
+    command.extend(["--add-dir", str(_attachments_dir(config, run_dir))])
     command.append("-")
     return TokExecutionPlan(
         command=tuple(command),
@@ -149,7 +152,7 @@ def build_codex_app_server_tok_plan(config: TokConfig, prompt: str, run_dir: Pat
 
 
 def build_claude_code_goal_tok_plan(config: TokConfig, prompt: str, run_dir: Path) -> TokExecutionPlan:
-    attachments_dir = run_dir / "attachments"
+    attachments_dir = _attachments_dir(config, run_dir)
     final_prompt = _claude_code_goal_prompt(prompt)
     output_path = run_dir / "tok_report.json"
     run_cwd = config.run_cwd or config.write_dirs[0]
@@ -186,8 +189,16 @@ def _claude_code_sandbox_args(sandbox: str, attachments_dir: Path) -> list[str]:
     return ["--permission-mode", "acceptEdits", "--allowedTools", "Bash", "--disallowedTools", protect_attachments]
 
 
-def _run_claude_code_goal(plan: TokExecutionPlan, timeout_seconds: float | None) -> bool:
-    stdout = run_claude_print_logged(list(plan.command), plan.cwd, plan.log_path, plan.prompt, timeout_seconds=timeout_seconds)
+def _run_claude_code_goal(config: TokConfig, plan: TokExecutionPlan, timeout_seconds: float | None) -> bool:
+    stdout = run_claude_print_logged(
+        list(plan.command),
+        plan.cwd,
+        plan.log_path,
+        plan.prompt,
+        timeout_seconds=timeout_seconds,
+        containment_root=config.containment_root,
+        containment_allow_network=config.network_access,
+    )
     if stdout is None:
         return False
     envelope = claude_print_envelope(stdout)
@@ -483,17 +494,21 @@ def _codex_app_server_sandbox_policy(config: TokConfig, plan: TokExecutionPlan) 
     if config.sandbox == "danger-full-access":
         return {"type": "dangerFullAccess"}
     if config.sandbox == "read-only":
-        return {"type": "readOnly", "networkAccess": True}
+        return {"type": "readOnly", "networkAccess": config.network_access}
     writable_roots = [
         str(path)
         for path in _dedupe_paths(
-            (*config.write_dirs, *config.runtime_write_dirs, plan.report_path.parent / "attachments")
+            (
+                *config.write_dirs,
+                *config.runtime_write_dirs,
+                _attachments_dir(config, plan.report_path.parent),
+            )
         )
     ]
     return {
         "type": "workspaceWrite",
         "writableRoots": writable_roots,
-        "networkAccess": True,
+        "networkAccess": config.network_access,
         "excludeTmpdirEnvVar": False,
         "excludeSlashTmp": False,
     }
@@ -514,6 +529,10 @@ def _dedupe_paths(paths: tuple[Path, ...], skip: tuple[Path, ...] = ()) -> tuple
 
 def _path_key(path: Path) -> str:
     return str(path.resolve(strict=False))
+
+
+def _attachments_dir(config: TokConfig, run_dir: Path) -> Path:
+    return config.attachments_dir or (run_dir / "attachments")
 
 
 def runtime_tok_report() -> dict[str, Any]:
@@ -557,6 +576,16 @@ def _codex_goal_completion_error(log_path: Path) -> str | None:
 
 def _codex_goal_log_has_completion_marker(log_text: str) -> bool:
     return any(line.strip() == "tokens used" for line in log_text.splitlines())
+
+
+def _provider_failure_kind(log_path: Path) -> AttemptOutcomeKind:
+    try:
+        log_text = log_path.read_text(encoding="utf-8", errors="replace").lower()
+    except OSError:
+        return AttemptOutcomeKind.PROVIDER_ERROR
+    if "timed out" in log_text or "timeout" in log_text or "resource limit" in log_text:
+        return AttemptOutcomeKind.RESOURCE_LIMIT
+    return AttemptOutcomeKind.PROVIDER_ERROR
 
 
 def _snapshot_attachment_files(attachment_dir: Path) -> dict[str, str]:

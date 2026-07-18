@@ -9,6 +9,7 @@ import re
 import tomllib
 
 from .lease import CapabilityLease, FileOperation, LeaseRule
+from .supervisor import DEFAULT_REFRAME_ANGLES
 from .template import template_placeholders
 
 
@@ -136,6 +137,9 @@ class TokConfig:
     runtime_write_dirs: tuple[Path, ...] = ()
     model: str | None = None
     codex_features: tuple[str, ...] = ()
+    containment_root: Path | None = None
+    attachments_dir: Path | None = None
+    network_access: bool = True
 
 
 @dataclass(frozen=True)
@@ -149,9 +153,11 @@ class SafetyConfig:
 @dataclass(frozen=True)
 class PerpetualConfig:
     enabled: bool = False
+    substantive_goal: str | None = None
     healthy_interval_seconds: float = 6 * 60 * 60
     active_interval_seconds: float = 30 * 60
     provider_backoff_seconds: tuple[float, ...] = (5 * 60, 30 * 60, 2 * 60 * 60)
+    reframe_angles: tuple[str, ...] = DEFAULT_REFRAME_ANGLES
 
 
 @dataclass(frozen=True)
@@ -341,6 +347,7 @@ def load_config(config_path: str | Path = "goal.toml") -> GoalConfig:
         raise ConfigError("[perpetual] must be a table")
     perpetual = PerpetualConfig(
         enabled=_bool(perpetual_raw.get("enabled"), False, "perpetual.enabled"),
+        substantive_goal=_optional_str(perpetual_raw, "substantive_goal"),
         healthy_interval_seconds=float(perpetual_raw.get("healthy_interval_seconds", 6 * 60 * 60)),
         active_interval_seconds=float(perpetual_raw.get("active_interval_seconds", 30 * 60)),
         provider_backoff_seconds=tuple(
@@ -350,6 +357,7 @@ def load_config(config_path: str | Path = "goal.toml") -> GoalConfig:
                 "perpetual.provider_backoff_seconds",
             )
         ),
+        reframe_angles=tuple(_string_list(perpetual_raw.get("reframe_angles", list(DEFAULT_REFRAME_ANGLES)), "perpetual.reframe_angles")),
     )
 
     lease = _load_capability_lease(raw.get("lease"))
@@ -635,6 +643,8 @@ def analyze_config_policy(config: GoalConfig) -> ConfigPolicyReport:
             issues.append(ConfigIssue("perpetual.active_interval_seconds.non_positive", "perpetual.active_interval_seconds must be positive"))
         if not config.perpetual.provider_backoff_seconds or any(value <= 0 for value in config.perpetual.provider_backoff_seconds):
             issues.append(ConfigIssue("perpetual.provider_backoff_seconds.invalid", "perpetual.provider_backoff_seconds must contain positive values"))
+        if not config.perpetual.reframe_angles:
+            issues.append(ConfigIssue("perpetual.reframe_angles.empty", "perpetual.reframe_angles must contain at least one substantive angle"))
     issues.extend(ConfigIssue("prompt.placeholder", issue) for issue in validate_prompt_templates(config))
     issues.extend(ConfigIssue("prompt.language", issue) for issue in validate_runtime_prompt_language(config))
 

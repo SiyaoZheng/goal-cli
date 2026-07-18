@@ -12,6 +12,7 @@ from goal_cli.config import load_config
 from goal_cli.runtime import DEFAULT_MAX_MINUTES, CleanupResult, RunResult
 from goal_cli.system_heartbeat import (
     DEFAULT_EVERY_MINUTES,
+    DEFAULT_PERPETUAL_WAKE_MINUTES,
     SystemHeartbeatOptions,
     build_system_heartbeat_layout,
     install_system_heartbeat,
@@ -38,7 +39,20 @@ class SystemHeartbeatTests(unittest.TestCase):
             self.assertEqual(layout.max_minutes, DEFAULT_MAX_MINUTES)
             self.assertEqual(layout.interval_seconds, 1800)
             self.assertEqual(DEFAULT_EVERY_MINUTES, 30.0)
+            self.assertEqual(DEFAULT_PERPETUAL_WAKE_MINUTES, 5.0)
             self.assertEqual(layout.tick_args[-2:], ("--max-minutes", "600"))
+
+    def test_perpetual_layout_defaults_to_five_minute_wakeups(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = load_config(self._write_project(root, perpetual=True))
+
+            layout = build_system_heartbeat_layout(
+                config,
+                SystemHeartbeatOptions(manager="launchd", label="goal-cli-test"),
+            )
+
+            self.assertEqual(layout.interval_seconds, 300)
 
     def test_launchd_layout_runs_one_absolute_tick(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -160,7 +174,7 @@ class SystemHeartbeatTests(unittest.TestCase):
             self.assertIn("warning: heartbeat lock is active", result.errors)
             self.assertEqual(run_goal.call_args.args[1].max_minutes, 3)
 
-    def _write_project(self, root: Path) -> Path:
+    def _write_project(self, root: Path, *, perpetual: bool = False) -> Path:
         (root / "src").mkdir()
         (root / "output").mkdir()
         (root / "build").mkdir()
@@ -201,6 +215,8 @@ class SystemHeartbeatTests(unittest.TestCase):
             generated_dirs = ["output", "build"]
             """
         ).strip()
+        if perpetual:
+            config += "\n\n[perpetual]\nenabled = true"
         config_path = root / "goal.toml"
         config_path.write_text(config + "\n", encoding="utf-8")
         return config_path
